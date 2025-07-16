@@ -1,0 +1,7 @@
+numpy
+sentence-transformers
+faiss-cpu
+psutil
+
+# For development/testing
+# pytest 
