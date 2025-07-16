@@ -1,0 +1,12 @@
+Server Side Public License v1.0
+Copyright (c) 2024 Semantrix Contributors
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the Server Side Public License (SSPL), version 1.0,
+as published by MongoDB, Inc.
+
+Additional Condition:
+If you make Semantrix available as a service (e.g., API, SaaS, or hosted product),
+you must open-source all software used to operate that service under SSPL.
+
+Full license text: https://www.mongodb.com/licensing/server-side-public-license 
