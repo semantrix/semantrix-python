@@ -22,4 +22,5 @@ class Profiler:
             self.stats[operation]["time"] += duration
             
     def get_stats(self) -> dict:
+        #random comment
         return dict(self.stats) if self.enabled else {} 
