@@ -2,6 +2,7 @@ numpy
 sentence-transformers
 faiss-cpu
 psutil
+attrs
 
 # For development/testing
 # pytest 
