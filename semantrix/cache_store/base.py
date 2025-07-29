@@ -57,37 +57,37 @@ class BaseCacheStore(ABC):
     """Abstract base class for cache storage with eviction policies."""
     
     @abstractmethod
-    def get_exact(self, prompt: str) -> Optional[str]:
+    async def get_exact(self, prompt: str) -> Optional[str]:
         """
-        Get an exact match for a prompt.
-        
+        Get a cached response if it exists and is not expired.
+
         Args:
-            prompt: The prompt to search for
-            
+            prompt: The prompt to look up in the cache.
+
         Returns:
-            The cached response if found, None otherwise
+            The cached response if found and not expired, None otherwise.
         """
         pass
     
     @abstractmethod
-    def add(self, prompt: str, response: str) -> None:
+    async def add(self, prompt: str, response: str) -> None:
         """
-        Add a prompt-response pair to the cache.
-        
+        Add a response to the cache.
+
         Args:
-            prompt: The prompt
-            response: The response to cache
+            prompt: The prompt to cache.
+            response: The response to cache.
         """
         pass
     
     @abstractmethod
     async def enforce_limits(self, resource_limits: Any) -> None:
         """
-        Enforce resource limits by evicting items if necessary.
-        
+        Enforce cache size limits asynchronously.
+
         Args:
-            resource_limits: The resource limits object containing cache limits
-            
+            resource_limits: The resource limits to enforce.
+
         Note:
             This method should be called whenever the cache is modified to ensure
             that it doesn't exceed the specified resource limits.
@@ -95,13 +95,13 @@ class BaseCacheStore(ABC):
         pass
     
     @abstractmethod
-    def clear(self) -> None:
-        """Clear all cached items."""
+    async def clear(self) -> None:
+        """Clear all cached items asynchronously."""
         pass
     
     @abstractmethod
-    def size(self) -> int:
-        """Get the number of cached items."""
+    async def size(self) -> int:
+        """Get the number of cached items asynchronously."""
         pass
     
     @abstractmethod

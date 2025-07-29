@@ -37,36 +37,61 @@ class Semantrix:
         self.profiler = Profiler(enabled=enable_profiling)
         self.similarity_threshold = similarity_threshold
 
-    def get(self, prompt: str) -> Optional[str]:
+    async def get(self, prompt: str) -> Optional[str]:
+        """
+        Get a cached response for the given prompt asynchronously.
+        
+        Args:
+            prompt: The prompt to look up in the cache.
+            
+        Returns:
+            The cached response if found, None otherwise.
+        """
         with self.profiler.record("get"):
             # 1. Check resource constraints
             if not self.resource_limits.allow_operation():
                 return None
+                
             # 2. Exact match
-            exact_match = self.cache_store.get_exact(prompt)
+            exact_match = await self.cache_store.get_exact(prompt)
             if exact_match is not None:
                 return exact_match
-            # 3. Semantic search
-            embedding = self.embedder.encode(prompt)
-            match = self.vector_store.search(embedding, self.similarity_threshold)
-            if isinstance(match, str):
-                return match
+                
+            # 3. Semantic search (if vector store is available)
+            if hasattr(self.embedder, 'encode'):
+                embedding = self.embedder.encode(prompt)
+                if hasattr(self.vector_store, 'search'):
+                    match = await self.vector_store.search(embedding, self.similarity_threshold)
+                    if isinstance(match, str):
+                        return match
             return None
 
-    def set(self, prompt: str, response: str):
+    async def set(self, prompt: str, response: str) -> None:
+        """
+        Add a prompt-response pair to the cache asynchronously.
+        
+        Args:
+            prompt: The prompt to cache.
+            response: The response to cache.
+        """
         with self.profiler.record("set"):
             if not self.resource_limits.allow_operation():
                 return
+                
             # 1. Add to cache
-            embedding = self.embedder.encode(prompt)
-            self.vector_store.add(embedding, response)
-            self.cache_store.add(prompt, response)
-            # 2. Enforce limits
-            self.cache_store.enforce_limits(self.resource_limits)
+            if hasattr(self.embedder, 'encode'):
+                embedding = self.embedder.encode(prompt)
+                if hasattr(self.vector_store, 'add'):
+                    await self.vector_store.add(embedding, response)
+                    
+            await self.cache_store.add(prompt, response)
             
-    def explain(self, prompt: str) -> ExplainResult:
+            # 2. Enforce limits
+            await self.cache_store.enforce_limits(self.resource_limits)
+            
+    async def explain(self, prompt: str) -> ExplainResult:
         """
-        Explain why a prompt missed or hit the cache.
+        Explain why a prompt missed or hit the cache asynchronously.
         
         Args:
             prompt: The prompt to explain
@@ -81,21 +106,29 @@ class Semantrix:
         resource_warnings = []
         
         if resource_limited:
-            # Get resource warnings (this would need to be implemented in ResourceLimits)
             resource_warnings.append("Resource limits exceeded")
         
         # Check exact match
-        exact_match = self.cache_store.get_exact(prompt)
+        exact_match = await self.cache_store.get_exact(prompt)
         exact_match_found = exact_match is not None
         
-        # Get semantic matches
-        embedding_start = time.time()
-        embedding = self.embedder.encode(prompt)
-        embedding_time = (time.time() - embedding_start) * 1000  # Convert to ms
+        # Initialize variables for semantic search
+        embedding = None
+        matches = []
+        embedding_time = 0
+        search_time = 0
         
-        search_start = time.time()
-        matches = self.vector_store.search(embedding, top_k=5)
-        search_time = (time.time() - search_start) * 1000  # Convert to ms
+        # Only perform semantic search if needed and possible
+        if not exact_match_found and hasattr(self.embedder, 'encode') and hasattr(self.vector_store, 'search'):
+            # Get embedding
+            embedding_start = time.time()
+            embedding = self.embedder.encode(prompt)
+            embedding_time = (time.time() - embedding_start) * 1000  # Convert to ms
+            
+            # Search for similar vectors
+            search_start = time.time()
+            matches = await self.vector_store.search(embedding, top_k=5)
+            search_time = (time.time() - search_start) * 1000  # Convert to ms
         
         total_time = (time.time() - start_time) * 1000  # Convert to ms
         
