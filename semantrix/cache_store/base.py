@@ -9,20 +9,38 @@ class EvictionStrategy(ABC):
     """Abstract base class for cache eviction strategies."""
     
     @abstractmethod
-    def should_evict(self, cache_size: int, max_size: int) -> bool:
-        """Determine if eviction should occur."""
+    async def should_evict(self, cache_size: int, max_size: int) -> bool:
+        """
+        Determine if eviction should occur.
+        
+        Args:
+            cache_size: Current size of the cache
+            max_size: Maximum allowed size of the cache
+            
+        Returns:
+            bool: True if eviction should occur, False otherwise
+        """
         pass
     
     @abstractmethod
-    def get_eviction_candidates(self, cache: Dict[str, Any], max_size: int) -> list[str]:
-        """Get list of keys to evict."""
+    async def get_eviction_candidates(self, cache: Dict[str, Any], max_size: int) -> list[str]:
+        """
+        Get list of keys to evict.
+        
+        Args:
+            cache: The cache dictionary
+            max_size: Maximum allowed size of the cache
+            
+        Returns:
+            list[str]: List of keys to evict
+        """
         pass
 
 class EvictionPolicy(ABC):
     """Abstract base class for eviction policies."""
     
     @abstractmethod
-    def apply(self, cache: Dict[str, Any], max_size: int) -> int:
+    async def apply(self, cache: Dict[str, Any], max_size: int) -> int:
         """
         Apply the eviction policy and return number of items evicted.
         
@@ -31,7 +49,7 @@ class EvictionPolicy(ABC):
             max_size: Maximum allowed size
             
         Returns:
-            Number of items evicted
+            int: Number of items evicted
         """
         pass
 
@@ -63,12 +81,16 @@ class BaseCacheStore(ABC):
         pass
     
     @abstractmethod
-    def enforce_limits(self, resource_limits: Any) -> None:
+    async def enforce_limits(self, resource_limits: Any) -> None:
         """
         Enforce resource limits by evicting items if necessary.
         
         Args:
-            resource_limits: The resource limits object
+            resource_limits: The resource limits object containing cache limits
+            
+        Note:
+            This method should be called whenever the cache is modified to ensure
+            that it doesn't exceed the specified resource limits.
         """
         pass
     
