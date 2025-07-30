@@ -5,7 +5,7 @@ This module provides an interface for text embedding models with async support.
 """
 
 from .base import BaseEmbedder
-from .implementations import (
+from .embedders import (
     SentenceTransformerEmbedder,
     OnnxEmbedder,
 )
