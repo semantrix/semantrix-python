@@ -1,11 +1,17 @@
-from semantrix.embedding.embedding import BaseEmbedder, Embedder
+import asyncio
+import logging
+import time
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+from semantrix.embedding import BaseEmbedder, get_embedder
 from semantrix.vector_store.vector_store import BaseVectorStore, FAISSVectorStore
 from semantrix.cache_store import BaseCacheStore, InMemoryStore
 from semantrix.utils.resource_limits import ResourceLimits
 from semantrix.utils.profiling import Profiler
 from semantrix.models.explain import ExplainResult, CacheMatch, create_explain_result
-from typing import Optional
-import time
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 class Semantrix:
     def __init__(
@@ -29,7 +35,7 @@ class Semantrix:
             cache_store: Custom cache store implementation (defaults to InMemoryStore)
         """
         # Initialize components with defaults if not provided
-        self.embedder = embedder or Embedder()
+        self.embedder = embedder or get_embedder("sentence-transformers")
         self.vector_store = vector_store or FAISSVectorStore(dimension=self.embedder.get_dimension())
         self.cache_store = cache_store or InMemoryStore()
         
@@ -46,6 +52,9 @@ class Semantrix:
             
         Returns:
             The cached response if found, None otherwise.
+            
+        Raises:
+            RuntimeError: If there's an error during the embedding process
         """
         with self.profiler.record("get"):
             # 1. Check resource constraints
@@ -58,12 +67,19 @@ class Semantrix:
                 return exact_match
                 
             # 3. Semantic search (if vector store is available)
-            if hasattr(self.embedder, 'encode'):
-                embedding = self.embedder.encode(prompt)
-                if hasattr(self.vector_store, 'search'):
+            if hasattr(self.embedder, 'aencode') and hasattr(self.vector_store, 'search'):
+                try:
+                    # Use async embedding
+                    embedding = await self.embedder.aencode(prompt)
+                    
+                    # Search in vector store
                     match = await self.vector_store.search(embedding, self.similarity_threshold)
                     if isinstance(match, str):
                         return match
+                except Exception as e:
+                    logger.error(f"Error during semantic search: {e}")
+                    # Continue to return None if there's an error
+                    
             return None
 
     async def set(self, prompt: str, response: str) -> None:
@@ -73,21 +89,34 @@ class Semantrix:
         Args:
             prompt: The prompt to cache.
             response: The response to cache.
+            
+        Raises:
+            RuntimeError: If there's an error during the embedding process
         """
         with self.profiler.record("set"):
             if not self.resource_limits.allow_operation():
                 return
                 
             # 1. Add to cache
-            if hasattr(self.embedder, 'encode'):
-                embedding = self.embedder.encode(prompt)
-                if hasattr(self.vector_store, 'add'):
-                    await self.vector_store.add(embedding, response)
+            if hasattr(self.embedder, 'aencode') and hasattr(self.vector_store, 'add'):
+                try:
+                    # Use async embedding
+                    embedding = await self.embedder.aencode(prompt)
                     
+                    # Add to vector store
+                    await self.vector_store.add(embedding, response)
+                except Exception as e:
+                    logger.error(f"Error during embedding or vector store add: {e}")
+                    # Continue to cache the exact match even if embedding fails
+            
+            # Always cache the exact match
             await self.cache_store.add(prompt, response)
             
             # 2. Enforce limits
-            await self.cache_store.enforce_limits(self.resource_limits)
+            try:
+                await self.cache_store.enforce_limits(self.resource_limits)
+            except Exception as e:
+                logger.error(f"Error enforcing cache limits: {e}")
             
     async def explain(self, prompt: str) -> ExplainResult:
         """
@@ -98,6 +127,9 @@ class Semantrix:
             
         Returns:
             ExplainResult with detailed information about the cache lookup
+            
+        Raises:
+            RuntimeError: If there's an error during the explanation process
         """
         start_time = time.time()
         
@@ -119,16 +151,24 @@ class Semantrix:
         search_time = 0
         
         # Only perform semantic search if needed and possible
-        if not exact_match_found and hasattr(self.embedder, 'encode') and hasattr(self.vector_store, 'search'):
-            # Get embedding
-            embedding_start = time.time()
-            embedding = self.embedder.encode(prompt)
-            embedding_time = (time.time() - embedding_start) * 1000  # Convert to ms
-            
-            # Search for similar vectors
-            search_start = time.time()
-            matches = await self.vector_store.search(embedding, top_k=5)
-            search_time = (time.time() - search_start) * 1000  # Convert to ms
+        if not exact_match_found and hasattr(self.embedder, 'aencode') and hasattr(self.vector_store, 'search'):
+            try:
+                # Get embedding asynchronously
+                embedding_start = time.time()
+                embedding = await self.embedder.aencode(prompt)
+                embedding_time = (time.time() - embedding_start) * 1000  # Convert to ms
+                
+                # Search for similar vectors
+                search_start = time.time()
+                matches = await self.vector_store.search(embedding, top_k=5)
+                search_time = (time.time() - search_start) * 1000  # Convert to ms
+                
+                # Ensure matches is a list of (text, similarity) tuples
+                if not isinstance(matches, list):
+                    matches = []
+            except Exception as e:
+                logger.error(f"Error during explain embedding/search: {e}")
+                matches = []
         
         total_time = (time.time() - start_time) * 1000  # Convert to ms
         

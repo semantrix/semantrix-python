@@ -17,9 +17,9 @@ from collections import OrderedDict
 
 # Import the base classes and SemantrixClient
 from semantrix.client import SemantrixClient
-from semantrix.embedding.embedding import BaseEmbedder
+from semantrix.embedding import BaseEmbedder, get_embedder
 from semantrix.vector_store.vector_store import BaseVectorStore
-from semantrix.cache_store.eviction import BaseCacheStore
+from semantrix.cache_store import BaseCacheStore
 
 
 # Example 1: Custom Embedder using a simple hash-based approach
