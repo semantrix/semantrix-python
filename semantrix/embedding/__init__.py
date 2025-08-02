@@ -8,10 +8,20 @@ from .base import BaseEmbedder
 from .embedders import (
     SentenceTransformerEmbedder,
     OnnxEmbedder,
+    OpenAIEmbedder,
+    LangChainEmbedder,
+    OllamaEmbedder,
+    MistralEmbedder,
+    CohereEmbedder,
 )
 
 __all__ = [
     'BaseEmbedder',
     'SentenceTransformerEmbedder',
     'OnnxEmbedder',
+    'OpenAIEmbedder',
+    'LangChainEmbedder',
+    'OllamaEmbedder',
+    'MistralEmbedder',
+    'CohereEmbedder',
 ]

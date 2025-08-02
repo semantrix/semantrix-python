@@ -6,29 +6,27 @@
 ## Features  
 - 🚀 High-performance semantic caching for AI applications
 - 🔍 Multiple storage backends (In-Memory, DynamoDB, ElastiCache, Google Memorystore, and more)
+- 🤖 Multiple embedding providers (OpenAI, LangChain, Ollama, Mistral, Cohere, Sentence Transformers, ONNX)
 - ⚡ Async-first API for maximum performance
 - 🛡️ Resource management with async context managers
 - 📦 Lightweight and extensible architecture
 - 🔄 Support for various eviction policies (LRU, LFU, FIFO, custom)
 - 📊 Built-in monitoring and metrics
 
-## Quick Start  
-
-### Installation
+## Installation
 ```bash
-# Core package with in-memory cache
+# Core package with in-memory cache and basic embedders
 pip install semantrix
 
 # For specific backends, install optional dependencies:
 
-# AWS DynamoDB
-pip install "semantrix[dynamodb]"
-
-# AWS ElastiCache (Redis protocol)
-pip install "semantrix[elasticache]"
-
-# Google Cloud Memorystore
-pip install "semantrix[google-memorystore]"
+# Embedding providers
+pip install "semantrix[openai]"      # OpenAI embeddings
+pip install "semantrix[langchain]"   # LangChain embeddings
+pip install "semantrix[mistral]"     # Mistral AI embeddings
+pip install "semantrix[cohere]"      # Cohere embeddings
+pip install "semantrix[sentence-transformers]"  # Sentence Transformers
+pip install "semantrix[onnx]"        # ONNX runtime
 
 # Vector store backends
 pip install "semantrix[faiss]"       # FAISS vector store
@@ -37,9 +35,16 @@ pip install "semantrix[qdrant]"      # Qdrant
 pip install "semantrix[pinecone]"    # Pinecone
 pip install "semantrix[milvus]"      # Milvus
 
+# Cloud backends
+pip install "semantrix[dynamodb]"    # AWS DynamoDB
+pip install "semantrix[elasticache]"  # AWS ElastiCache (Redis protocol)
+pip install "semantrix[google-memorystore]"  # Google Cloud Memorystore
+
 # Or install all optional dependencies
 pip install "semantrix[all]"
 ```
+
+## Quick Start
 
 ### Basic Usage (Synchronous)
 ```python
@@ -75,49 +80,249 @@ async def main():
 asyncio.run(main())
 ```
 
-### Using Different Cache Stores
+## Embedding Providers
+
+Semantrix supports multiple embedding providers out of the box. Here's how to use each one:
+
+### OpenAI Embeddings
+```python
+from semantrix.embedding import OpenAIEmbedder
+import asyncio
+
+async def main():
+    # Initialize with your API key (or set OPENAI_API_KEY environment variable)
+    embedder = OpenAIEmbedder(
+        model="text-embedding-3-small",  # or "text-embedding-3-large"
+        api_key="your-api-key"
+    )
+    
+    # Get embeddings
+    embedding = await embedder.encode("This is a test sentence.")
+    print(f"Embedding dimension: {embedder.get_dimension()}")
+    print(f"Sample embedding: {embedding[:5]}...")
+
+asyncio.run(main())
+```
+
+### LangChain Embeddings
+LangChain integration allows using any LangChain-compatible embedding model:
+
+```python
+from semantrix.embedding import LangChainEmbedder
+import asyncio
+
+async def main():
+    # Option 1: Auto-detect from model name
+    embedder = LangChainEmbedder.from_model_name(
+        model_name="all-MiniLM-L6-v2",
+        batch_size=16
+    )
+    
+    # Option 2: Use a LangChain embeddings instance directly
+    # from langchain_community.embeddings import HuggingFaceEmbeddings
+    # embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    # embedder = LangChainEmbedder(embeddings=embeddings)
+    
+    # Get embeddings
+    embedding = await embedder.encode("This is a test sentence.")
+    print(f"Embedding dimension: {embedder.get_dimension()}")
+
+asyncio.run(main())
+```
+
+### Ollama Embeddings
+For local models using Ollama:
+
+```python
+from semantrix.embedding import OllamaEmbedder
+import asyncio
+
+async def main():
+    # Initialize with your local Ollama server
+    embedder = OllamaEmbedder(
+        model="nomic-embed-text",  # or any model you have pulled with Ollama
+        base_url="http://localhost:11434"
+    )
+    
+    # Get embeddings
+    embedding = await embedder.encode("This is a test sentence.")
+    print(f"Embedding dimension: {embedder.get_dimension()}")
+
+asyncio.run(main())
+```
+
+### Mistral AI Embeddings
+For Mistral's embedding models:
+
+```python
+from semantrix.embedding import MistralEmbedder
+import asyncio
+
+async def main():
+    # Initialize with your API key (or set MISTRAL_API_KEY environment variable)
+    embedder = MistralEmbedder(
+        model="mistral-embed",
+        api_key="your-api-key"
+    )
+    
+    # Get embeddings
+    embedding = await embedder.encode("This is a test sentence.")
+    print(f"Embedding dimension: {embedder.get_dimension()}")
+
+asyncio.run(main())
+```
+
+### Cohere Embeddings
+For high-quality embeddings from Cohere's API:
+
+```python
+from semantrix.embedding import CohereEmbedder
+import asyncio
+
+async def main():
+    # Initialize with your API key (or set COHERE_API_KEY environment variable)
+    embedder = CohereEmbedder(
+        model="embed-english-v3.0",  # or "embed-multilingual-v3.0"
+        api_key="your-api-key",
+        input_type="search_document",  # or "search_query" for queries
+        truncate="END"  # Handle long texts: "NONE", "START", "END"
+    )
+    
+    # Single text embedding
+    embedding = await embedder.encode("This is a test sentence.")
+    print(f"Embedding dimension: {embedder.get_dimension()}")
+    
+    # Batch processing
+    texts = ["First document", "Second document"]
+    embeddings = await embedder.batch_encode(texts)
+    print(f"Processed {len(embeddings)} documents")
+
+asyncio.run(main())
+```
+
+### Sentence Transformers
+For local models using Sentence Transformers:
+
+```python
+from semantrix.embedding import SentenceTransformerEmbedder
+import asyncio
+
+async def main():
+    # Initialize with any Sentence Transformers model
+    embedder = SentenceTransformerEmbedder(
+        model_name="all-MiniLM-L6-v2",
+        device="cpu"  # or "cuda" for GPU
+    )
+    
+    # Get embeddings
+    embedding = await embedder.encode("This is a test sentence.")
+    print(f"Embedding dimension: {embedder.get_dimension()}")
+
+asyncio.run(main())
+```
+
+### ONNX Models
+For optimized ONNX models:
+
+```python
+from semantrix.embedding import OnnxEmbedder
+import asyncio
+
+async def main():
+    # Initialize with path to ONNX model
+    embedder = OnnxEmbedder(
+        model_path="path/to/model.onnx",
+        provider="CPUExecutionProvider"  # or "CUDAExecutionProvider"
+    )
+    
+    # Get embeddings
+    embedding = await embedder.encode("This is a test sentence.")
+    print(f"Embedding dimension: {embedder.get_dimension()}")
+
+asyncio.run(main())
+```
+## Advanced Usage
+```python
+from semantrix import Semantrix
+
+# Create a cache instance with default in-memory store
+cache = Semantrix()
+
+# Add to cache
+cache.set("Explain quantum physics", "It's about...")
+
+# Get from cache (with semantic matching)
+response = cache.get("What is quantum theory?")
+print(response)  # Returns semantically similar cached response
+```
+
+### Async Usage (Recommended)
+```python
+import asyncio
+from semantrix import AsyncSemantrix
+
+async def main():
+    # Create an async cache instance
+    cache = AsyncSemantrix()
+    
+    # Add to cache
+    await cache.add("Explain quantum physics", "It's about...", ttl=3600)
+    
+    # Get from cache with semantic matching
+    response = await cache.get("What is quantum theory?")
+    print(response)  # Returns semantically similar cached response
+
+asyncio.run(main())
+```
+
+### Cache Stores
+
+Semantrix supports various cache store backends:
+
+#### In-Memory (Default)
+```python
+from semantrix import AsyncSemantrix
+
+# Uses in-memory store by default
+cache = AsyncSemantrix()
+```
 
 #### AWS DynamoDB
 ```python
 from semantrix.cache_store.stores import DynamoDBCacheStore
 
 # Create a DynamoDB cache store
-dynamo_store = DynamoDBCacheStore(
+store = DynamoDBCacheStore(
     table_name="semantrix-cache",
     region_name="us-west-2"
 )
 
-# Use with Semantrix
-cache = AsyncSemantrix(store=dynamo_store)
+cache = AsyncSemantrix(store=store)
 ```
 
 #### AWS ElastiCache (Redis)
 ```python
 from semantrix.cache_store.stores import ElastiCacheStore
 
-# Create an ElastiCache store
-redis_store = ElastiCacheStore(
+store = ElastiCacheStore(
     endpoint="my-cache.xxxxx.ng.0001.aps1.cache.amazonaws.com:6379",
     ssl=True
 )
 
-# Use with Semantrix
-cache = AsyncSemantrix(store=redis_store)
+cache = AsyncSemantrix(store=store)
 ```
 
 #### Google Memorystore
 ```python
 from semantrix.cache_store.stores import GoogleMemorystoreCacheStore
 
-# Create a Google Memorystore store
-google_store = GoogleMemorystoreCacheStore(
+store = GoogleMemorystoreCacheStore(
     project_id="your-project-id",
     region="us-central1",
     instance_id="semantrix-cache"
 )
 
-# Use with Semantrix
-cache = AsyncSemantrix(store=google_store)
+cache = AsyncSemantrix(store=store)
 ```
 
 ## Advanced Features
