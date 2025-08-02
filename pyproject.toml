@@ -1,0 +1,180 @@
+[build-system]
+requires = ["setuptools>=42.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+line_length = 88
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = [
+    "boto3.*",
+    "botocore.*",
+    "google.*",
+    "pymongo.*",
+    "motor.*",
+    "redis.*",
+    "pytest.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = "-v --asyncio-mode=auto"
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["semantrix"]
+omit = ["*/tests/*", "*/__init__.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[project]
+name = "semantrix"
+description = "A high-performance semantic cache for AI applications"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "SSPL-1.0"}
+license-files = {paths = ["LICENSE"]}
+authors = [
+    {name = "Semantrix Team", email = "info@semantrix.ai"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: Other/Proprietary License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "numpy>=1.19.0",
+    "pydantic>=1.8.0,<3.0.0",
+    "typing-extensions>=4.0.0",
+    "tqdm>=4.0.0",
+    "requests>=2.25.0",
+    "aiohttp>=3.8.0",
+    "orjson>=3.6.0",
+]
+
+[project.optional-dependencies]
+dynamodb = ["boto3>=1.26.0"]
+elasticache = ["redis>=4.3.0"]
+google-memorystore = ["google-cloud-redis>=2.0.0"]
+sqlite = ["aiosqlite>=0.17.0"]
+mongodb = ["motor>=3.0.0"]
+postgresql = ["asyncpg>=0.25.0"]
+documentdb = ["pymongo>=4.0.0"]
+sentence-transformers = ["sentence-transformers>=2.2.0"]
+onnx = ["onnxruntime>=1.12.0"]
+faiss = ["faiss-cpu>=1.7.0"]
+chroma = ["chromadb>=0.4.0"]
+pinecone = ["pinecone-client>=2.2.0"]
+qdrant = ["qdrant-client>=1.1.0"]
+milvus = ["pymilvus>=2.2.0"]
+
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.20.0",
+    "pytest-cov>=4.0.0",
+    "black>=22.0.0",
+    "isort>=5.0.0",
+    "mypy>=0.990",
+    "types-requests>=2.28.0",
+    "types-python-dateutil>=2.8.0",
+]
+
+docs = [
+    "sphinx>=5.0.0",
+    "sphinx-rtd-theme>=1.0.0",
+    "sphinx-autodoc-typehints>=1.15.0",
+    "myst-parser>=0.18.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/semantrix/semantrix-python"
+Documentation = "https://semantrix.readthedocs.io/"
+Repository = "https://github.com/semantrix/semantrix-python"
+Changelog = "https://github.com/semantrix/semantrix-python/blob/main/CHANGELOG.md"
+Issues = "https://github.com/semantrix/semantrix-python/issues"
+
+[project.scripts]
+semantrix = "semantrix.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["semantrix*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+"*" = ["py.typed"]
+
+[tool.ruff]
+line-length = 88
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "C",   # flake8-comprehensions
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "N",   # pep8-naming
+    "PL",  # pylint
+    "RUF", # ruff-specific rules
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+    "E203",  # whitespace before ':' (handled by black)
+]
+
+# Allow unused variables when they start with _
+unused-variable-allow-list = ["^_"]
+
+# Allow unused imports when they start with _
+unused-import-allow-list = ["^_"]
+
+# Allow star imports for certain modules
+allow-star-imports = ["typing"]
+
+# Target Python version
+target-version = "py38"

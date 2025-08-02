@@ -1,40 +1,51 @@
 # Semantrix · [![SSPL License](https://img.shields.io/badge/License-SSPL--1.0-ff69b4)](LICENSE)  
-**Blazing-fast semantic caching for LLMs in Python, Java, and Go.**  
+**Blazing-fast semantic caching for AI applications with support for multiple backends.**  
+
+> **Note**: This project is licensed under the [Server Side Public License (SSPL) v1.0](https://www.mongodb.com/licensing/server-side-public-license).
 
 ## Features  
-- 🚀 Multi-language support (Python/Java/Go)  
-- 🔍 Semantic matching (not just exact matches)  
-- ⚡ Async-first API for high performance
+- 🚀 High-performance semantic caching for AI applications
+- 🔍 Multiple storage backends (In-Memory, DynamoDB, ElastiCache, Google Memorystore, and more)
+- ⚡ Async-first API for maximum performance
 - 🛡️ Resource management with async context managers
-- 📦 Lightweight and efficient
+- 📦 Lightweight and extensible architecture
+- 🔄 Support for various eviction policies (LRU, LFU, FIFO, custom)
+- 📊 Built-in monitoring and metrics
 
 ## Quick Start  
 
 ### Installation
 ```bash
-# Python
-pip install semantrix-python
+# Core package with in-memory cache
+pip install semantrix
 
-# For vector store backends, install the required dependencies:
-pip install "semantrix-python[vector-stores]"
+# For specific backends, install optional dependencies:
 
-# Or install specific vector store dependencies as needed:
-pip install faiss-cpu    # For FAISS (CPU version)
-pip install chromadb     # For Chroma
-pip install qdrant-client  # For Qdrant
-pip install redis        # For Redis
-pip install psycopg2-binary  # For pgvector
-pip install pymilvus     # For Milvus
+# AWS DynamoDB
+pip install "semantrix[dynamodb]"
 
-# Go
-go get github.com/semantrix/go
+# AWS ElastiCache (Redis protocol)
+pip install "semantrix[elasticache]"
+
+# Google Cloud Memorystore
+pip install "semantrix[google-memorystore]"
+
+# Vector store backends
+pip install "semantrix[faiss]"       # FAISS vector store
+pip install "semantrix[chroma]"      # Chroma
+pip install "semantrix[qdrant]"      # Qdrant
+pip install "semantrix[pinecone]"    # Pinecone
+pip install "semantrix[milvus]"      # Milvus
+
+# Or install all optional dependencies
+pip install "semantrix[all]"
 ```
 
 ### Basic Usage (Synchronous)
 ```python
 from semantrix import Semantrix
 
-# Create a cache instance
+# Create a cache instance with default in-memory store
 cache = Semantrix()
 
 # Add to cache
@@ -42,12 +53,116 @@ cache.set("Explain quantum physics", "It's about...")
 
 # Get from cache (with semantic matching)
 response = cache.get("What is quantum theory?")
-print(response)  # Returns cached response
+print(response)  # Returns semantically similar cached response
 ```
 
 ### Async Usage (Recommended)
-
 ```python
+import asyncio
+from semantrix import AsyncSemantrix
+
+async def main():
+    # Create an async cache instance
+    cache = AsyncSemantrix()
+    
+    # Add to cache
+    await cache.add("Explain quantum physics", "It's about...", ttl=3600)
+    
+    # Get from cache with semantic matching
+    response = await cache.get("What is quantum theory?")
+    print(response)  # Returns semantically similar cached response
+
+asyncio.run(main())
+```
+
+### Using Different Cache Stores
+
+#### AWS DynamoDB
+```python
+from semantrix.cache_store.stores import DynamoDBCacheStore
+
+# Create a DynamoDB cache store
+dynamo_store = DynamoDBCacheStore(
+    table_name="semantrix-cache",
+    region_name="us-west-2"
+)
+
+# Use with Semantrix
+cache = AsyncSemantrix(store=dynamo_store)
+```
+
+#### AWS ElastiCache (Redis)
+```python
+from semantrix.cache_store.stores import ElastiCacheStore
+
+# Create an ElastiCache store
+redis_store = ElastiCacheStore(
+    endpoint="my-cache.xxxxx.ng.0001.aps1.cache.amazonaws.com:6379",
+    ssl=True
+)
+
+# Use with Semantrix
+cache = AsyncSemantrix(store=redis_store)
+```
+
+#### Google Memorystore
+```python
+from semantrix.cache_store.stores import GoogleMemorystoreCacheStore
+
+# Create a Google Memorystore store
+google_store = GoogleMemorystoreCacheStore(
+    project_id="your-project-id",
+    region="us-central1",
+    instance_id="semantrix-cache"
+)
+
+# Use with Semantrix
+cache = AsyncSemantrix(store=google_store)
+```
+
+## Advanced Features
+
+### Custom Eviction Policies
+```python
+from semantrix.cache_store.policy import LRUEvictionPolicy, LFUEvictionPolicy
+
+# Create a cache with LRU eviction
+lru_cache = AsyncSemantrix(
+    max_size=1000,
+    eviction_policy=LRUEvictionPolicy()
+)
+
+# Or with LFU eviction
+lfu_cache = AsyncSemantrix(
+    max_size=1000,
+    eviction_policy=LFUEvictionPolicy()
+)
+```
+
+### Monitoring and Metrics
+```python
+# Get cache statistics
+stats = await cache.get_stats()
+print(f"Cache hits: {stats['hits']}")
+print(f"Cache misses: {stats['misses']}")
+print(f"Current size: {await cache.size()}")
+```
+
+## Documentation
+
+For detailed documentation, see [docs/cache_store_guide.md](docs/cache_store_guide.md).
+
+## Contributing
+
+Contributions are welcome! Please read our [Contributing Guidelines](CONTRIBUTING.md) for details.
+
+## License
+
+This project is licensed under the [Server Side Public License (SSPL) v1.0](https://www.mongodb.com/licensing/server-side-public-license). See the [LICENSE](LICENSE) file for details.
+
+### About SSPL
+
+The SSPL is a copyleft license that requires that anyone who offers the licensed software as a service must make the service's source code available under this license. For more information, please see the [SSPL FAQ](https://www.mongodb.com/licensing/server-side-public-license/faq).
 import asyncio
 from semantrix import Semantrix
 
