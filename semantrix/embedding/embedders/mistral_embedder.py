@@ -6,20 +6,30 @@ embedding models, both via their API and local models.
 """
 
 import asyncio
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Union, TypeVar, Type, TYPE_CHECKING
 
 import numpy as np
 from pydantic import BaseModel, Field
 
 from semantrix.embedding.base import BaseEmbedder
 
+# Type variable for MistralClient
+MistralClientT = TypeVar('MistralClientT')
 
-try:
+# Only import MistralClient at runtime if available
+if TYPE_CHECKING:
     from mistralai.client import MistralClient
     from mistralai.models.embeddings import EmbeddingResponse
     MISTRAL_AVAILABLE = True
-except ImportError:
-    MISTRAL_AVAILABLE = False
+else:
+    try:
+        from mistralai.client import MistralClient
+        from mistralai.models.embeddings import EmbeddingResponse
+        MISTRAL_AVAILABLE = True
+    except ImportError:
+        MistralClient = None  # type: ignore
+        EmbeddingResponse = None  # type: ignore
+        MISTRAL_AVAILABLE = False
 
 
 class MistralEmbedder(BaseEmbedder):
@@ -83,8 +93,14 @@ class MistralEmbedder(BaseEmbedder):
         # Initialize with default dimension, will be updated on first use
         self._dimension = 1024  # Default for mistral-embed
     
-    def _get_client(self) -> MistralClient:
+    def _get_client(self) -> MistralClient:  # type: ignore
         """Get or create a Mistral client."""
+        if not MISTRAL_AVAILABLE:
+            raise ImportError(
+                "Mistral AI client is required. "
+                "Install with: pip install mistralai"
+            )
+            
         if self._client is None:
             self._client = MistralClient(
                 api_key=self.config.api_key,

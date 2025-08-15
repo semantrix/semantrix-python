@@ -223,6 +223,32 @@ class MongoDBCacheStore(BaseCacheStore):
         except PyMongoError as e:
             logger.error(f"Error adding item to MongoDB cache: {e}")
             raise
+            
+    async def delete(self, key: str) -> bool:
+        """
+        Delete a key from the MongoDB cache.
+        
+        Args:
+            key: The key to delete
+            
+        Returns:
+            bool: True if the key was found and deleted, False otherwise
+        """
+        try:
+            await self._ensure_connected()
+            if not self._collection:
+                return False
+                
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._collection.delete_one({"key": key})
+            )
+            
+            return result.deleted_count > 0
+            
+        except PyMongoError as e:
+            logger.error(f"Error deleting key from MongoDB cache: {e}")
+            return False
 
     async def clear(self) -> None:
         """Clear all items from the cache."""

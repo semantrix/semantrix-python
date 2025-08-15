@@ -213,6 +213,34 @@ class GoogleMemorystoreCacheStore(BaseCacheStore):
         except (RedisError, GoogleAPICallError) as e:
             logger.error(f"Error adding item to Google Memorystore: {e}")
             raise
+            
+    async def delete(self, key: str) -> bool:
+        """
+        Delete a key from the Google Memorystore cache.
+        
+        Args:
+            key: The key to delete
+            
+        Returns:
+            bool: True if the key was found and deleted, False otherwise
+        """
+        try:
+            await self._ensure_connected()
+            if not self._redis_client:
+                return False
+                
+            # Delete both the key and its metadata
+            pipeline = self._redis_client.pipeline()
+            pipeline.delete(key)
+            pipeline.delete(f"{key}:meta")
+            results = await pipeline.execute()
+            
+            # If either the key or its metadata was deleted, return True
+            return any(results)
+            
+        except (RedisError, GoogleAPICallError) as e:
+            logger.error(f"Error deleting key from Google Memorystore: {e}")
+            return False
     
     async def clear(self) -> None:
         """Clear all items from the cache."""

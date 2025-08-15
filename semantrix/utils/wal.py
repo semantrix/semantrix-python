@@ -125,6 +125,66 @@ class WriteAheadLog:
     async def fail_operation(self, request_id: str, error: str) -> bool:
         """Mark an operation as failed."""
         return await self._update_status(request_id, LogStatus.FAILED, {"error": error})
+        
+    async def get_pending_operations(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Scan WAL files and return all operations that are in PENDING state.
+        
+        Returns:
+            Dictionary mapping request_ids to operation data for all pending operations.
+        """
+        pending_ops = {}
+        
+        # Get all log files, sorted by creation time (oldest first)
+        log_files = sorted(self.log_dir.glob("wal_*.log"), key=os.path.getmtime)
+        
+        # Track the latest status of each operation
+        operation_status = {}
+        
+        # Process all log files in order
+        for log_file in log_files:
+            try:
+                with open(log_file, 'r') as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line)
+                            request_id = entry.get('request_id')
+                            if not request_id:
+                                continue
+                                
+                            # For status updates, track the latest status
+                            if entry.get('operation') == 'STATUS_UPDATE':
+                                original_id = entry.get('original_request_id')
+                                if original_id:
+                                    operation_status[original_id] = entry.get('status')
+                            # For regular operations, track their status
+                            elif 'status' in entry:
+                                operation_status[request_id] = entry['status']
+                                
+                            # If this is a pending operation, store its data
+                            if entry.get('status') == LogStatus.PENDING.value and 'data' in entry:
+                                pending_ops[request_id] = {
+                                    'operation_type': OperationType(entry.get('operation', '')),
+                                    'data': entry['data'],
+                                    'timestamp': entry.get('timestamp')
+                                }
+                                
+                        except (json.JSONDecodeError, ValueError) as e:
+                            logger.warning(f"Invalid log entry in {log_file}: {e}")
+                            continue
+                            
+            except IOError as e:
+                logger.error(f"Error reading WAL file {log_file}: {e}")
+                continue
+        
+        # Filter out any operations that have been committed or failed
+        result = {}
+        for req_id, op_data in pending_ops.items():
+            status = operation_status.get(req_id)
+            if status == LogStatus.PENDING.value:
+                result[req_id] = op_data
+                
+        return result
     
     async def _update_status(
         self, 
@@ -161,6 +221,31 @@ class WriteAheadLog:
                 logger.error(f"Error in batch flusher: {e}")
                 await asyncio.sleep(1)  # Prevent tight loop on errors
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.1, max=1.0)
+    )
+    async def _write_log_entry(self, entry: Dict[str, Any]) -> None:
+        """Write a single log entry to the current log file."""
+        if not self.current_log_fd:
+            await self._rotate_log()
+    
+        log_line = json.dumps(entry) + "\n"
+        
+        try:
+            self.current_log_fd.write(log_line)
+            if self.fsync:
+                os.fsync(self.current_log_fd.fileno())
+            self.current_log_size += len(log_line)
+            
+            # Rotate if needed
+            if self.current_log_size >= self.max_log_size:
+                await self._rotate_log()
+                
+        except IOError as e:
+            logger.error(f"Failed to write to WAL: {e}")
+            raise
+    
     async def _flush_batch(self):
         """Flush the current batch to disk."""
         if not self.batch:
@@ -172,32 +257,6 @@ class WriteAheadLog:
             
         for entry in batch:
             await self._write_log_entry(entry)
-    
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=0.1, max=1.0)
-    )
-    async def _write_log_entry(self, entry: Dict[str, Any]):
-        """Write a single log entry to the current log file."""
-        if not self.current_log_fd:
-            await self._rotate_log()
-            
-        log_line = json.dumps(entry) + "\n"
-        log_bytes = log_line.encode('utf-8')
-        
-        try:
-            self.current_log_fd.write(log_bytes)
-            if self.fsync:
-                os.fsync(self.current_log_fd.fileno())
-            self.current_log_size += len(log_bytes)
-            
-            # Rotate if needed
-            if self.current_log_size >= self.max_log_size:
-                await self._rotate_log()
-                
-        except IOError as e:
-            logger.error(f"Failed to write to WAL: {e}")
-            raise
     
     async def _rotate_log(self):
         """Rotate to a new log file."""

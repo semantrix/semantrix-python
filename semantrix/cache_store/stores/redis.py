@@ -97,6 +97,29 @@ class RedisCacheStore(BaseCacheStore):
         This is a no-op since Redis manages its own eviction.
         """
         pass
+        
+    async def delete(self, key: str) -> bool:
+        """
+        Delete a key from the Redis cache asynchronously.
+        
+        Args:
+            key: The key to delete
+            
+        Returns:
+            bool: True if the key was found and deleted, False otherwise
+        """
+        cache_key = self._get_key(key)
+        try:
+            if hasattr(self.redis, 'delete'):
+                if hasattr(self.redis, 'execute_command'):  # aioredis
+                    deleted = await self.redis.delete(cache_key)
+                else:  # redis-py
+                    deleted = self.redis.delete(cache_key)
+                return bool(deleted > 0)
+            return False
+        except Exception as e:
+            logger.error(f"Error deleting key from Redis: {e}")
+            return False
 
     async def clear(self) -> None:
         """Clear all cached items from Redis asynchronously."""

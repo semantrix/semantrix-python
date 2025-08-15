@@ -95,9 +95,43 @@ class BaseCacheStore(ABC):
         pass
     
     @abstractmethod
+    async def delete(self, key: str) -> bool:
+        """
+        Delete a key from the cache.
+
+        Args:
+            key: The key to delete
+            
+        Returns:
+            bool: True if the key was found and deleted, False otherwise
+        """
+        pass
+        
+    @abstractmethod
     async def clear(self) -> None:
         """Clear all cached items asynchronously."""
         pass
+
+
+class NoOpEvictionPolicy(EvictionPolicy):
+    """
+    A no-operation eviction policy that never evicts any items.
+    
+    This is useful when you want to disable eviction entirely.
+    """
+    
+    async def apply(self, cache: Dict[str, Any], max_size: int) -> int:
+        """
+        Apply the eviction policy (no-op implementation).
+        
+        Args:
+            cache: The cache dictionary (unused)
+            max_size: Maximum allowed size (unused)
+            
+        Returns:
+            int: Always returns 0 (no items evicted)
+        """
+        return 0
     
     @abstractmethod
     async def size(self) -> int:

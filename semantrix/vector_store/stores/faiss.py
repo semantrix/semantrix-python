@@ -139,24 +139,58 @@ class FAISSVectorStore(BaseVectorStore):
             raise ValueError(f"Unsupported index type: {self.index_type}")
         
         # Wrap with ID mapping to support arbitrary IDs
-        self._index = IndexIDMap(self._index)
+        # Only wrap if not already an IndexIDMap (in case of loading from disk)
+        if not isinstance(self._index, IndexIDMap):
+            self._index = IndexIDMap(self._index)
         self._is_trained = self.index_type == IndexType.FLAT  # Only Flat index doesn't need training
     
     def _normalize_vector(self, vector: Vector) -> npt.NDArray[np.float32]:
         """Convert and normalize a vector."""
-        if isinstance(vector, list):
-            vector = np.array(vector, dtype=np.float32)
-        else:
-            vector = np.asarray(vector, dtype=np.float32)
+        try:
+            if vector is None:
+                raise ValueError("Cannot normalize None vector")
+                
+            if isinstance(vector, (list, tuple)) and not vector:  # Empty list/tuple
+                raise ValueError("Cannot normalize empty vector")
+                
+            if isinstance(vector, np.ndarray) and (vector.size == 0 or np.all(np.isnan(vector))):
+                raise ValueError("Cannot normalize empty or NaN vector")
+                
+            # Convert to numpy array if needed
+            if not isinstance(vector, np.ndarray):
+                vector = np.array(vector, dtype=np.float32)
+            else:
+                vector = np.asarray(vector, dtype=np.float32)
             
-        if vector.ndim == 1:
-            vector = vector.reshape(1, -1)
+            # Handle scalar input
+            if vector.ndim == 0:
+                vector = np.array([vector], dtype=np.float32)
             
-        # Normalize for cosine similarity if needed
-        if self.metric == DistanceMetric.COSINE:
-            faiss.normalize_L2(vector)
+            # Ensure 2D array
+            if vector.ndim == 1:
+                vector = vector.reshape(1, -1)
             
-        return vector
+            # Check for invalid shapes
+            if vector.size == 0 or vector.shape[-1] == 0:
+                raise ValueError(f"Cannot normalize vector with invalid shape: {vector.shape}")
+            
+            # Verify dimensions match
+            if vector.shape[-1] != self.dimension:
+                raise ValueError(
+                    f"Vector dimension {vector.shape[-1]} does not match "
+                    f"expected dimension {self.dimension}"
+                )
+            
+            # Normalize for cosine similarity if needed
+            if self.metric == DistanceMetric.COSINE:
+                faiss.normalize_L2(vector)
+            
+            return vector
+            
+        except Exception as e:
+            error_msg = f"Error normalizing vector: {str(e)}"
+            self._logger.error(f"{error_msg}. Vector type: {type(vector)}, shape: {getattr(vector, 'shape', 'N/A')}")
+            raise ValueError(error_msg) from e
     
     def _denormalize_score(self, score: float) -> float:
         """Convert FAISS score to similarity score."""
@@ -196,6 +230,114 @@ class FAISSVectorStore(BaseVectorStore):
         """Run a function in the thread pool executor."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._executor, func, *args)
+        
+    async def create_index(
+        self,
+        index_type: IndexType = IndexType.FLAT,
+        metric: Optional[DistanceMetric] = None,
+        **kwargs: Any
+    ) -> bool:
+        """
+        Create or update the vector index.
+        
+        Args:
+            index_type: Type of index to create
+            metric: Distance metric to use (overrides default if provided)
+            **kwargs: Additional implementation-specific parameters
+            
+        Returns:
+            True if index creation was successful
+        """
+        try:
+            async with self._lock:
+                # Update index type and metric if provided
+                if index_type:
+                    self.index_type = index_type
+                if metric:
+                    self.metric = metric
+                    
+                # Update any additional parameters
+                self._index_params.update(kwargs)
+                
+                # Reinitialize the index with new parameters
+                self._init_index()
+                
+                # If we have existing vectors, we need to add them to the new index
+                if self._id_to_record:
+                    # Get all vectors and their IDs
+                    ids = []
+                    vectors = []
+                    for id, record in self._id_to_record.items():
+                        ids.append(int(id))
+                        vectors.append(record.embedding)
+                    
+                    # Add vectors to the new index
+                    if vectors:
+                        vectors = np.array(vectors, dtype=np.float32)
+                        if self.metric == DistanceMetric.COSINE:
+                            faiss.normalize_L2(vectors)
+                        self._index.add_with_ids(vectors, np.array(ids, dtype=np.int64))
+                
+                # Save to disk if persistence is enabled
+                if self.persist_path:
+                    await self._run_in_executor(self._save_to_disk)
+                    
+                return True
+                
+        except Exception as e:
+            self._logger.error(f"Failed to create/update index: {str(e)}")
+            return False
+    
+    async def list_collections(self) -> List[str]:
+        """
+        List all collections/namespaces in the store.
+        
+        Returns:
+            List of collection/namespace names
+        """
+        # For FAISS, we only support a single collection per instance
+        # The namespace is used as part of the persistence path if provided
+        return [self.namespace or 'default']
+    
+    async def delete_collection(self, name: str, **kwargs: Any) -> bool:
+        """
+        Delete a collection/namespace.
+        
+        Args:
+            name: Name of the collection to delete
+            **kwargs: Additional implementation-specific parameters
+            
+        Returns:
+            True if deletion was successful
+        """
+        try:
+            # Only allow deleting the current namespace/collection
+            if name != (self.namespace or 'default'):
+                self._logger.warning(f"Cannot delete non-existent collection: {name}")
+                return False
+                
+            async with self._lock:
+                # Clear all data
+                self._init_index()
+                self._id_to_record = {}
+                self._next_id = 0
+                
+                # Delete persisted files if they exist
+                if self.persist_path:
+                    try:
+                        if os.path.exists(f"{self.persist_path}.index"):
+                            os.remove(f"{self.persist_path}.index")
+                        if os.path.exists(f"{self.persist_path}.meta"):
+                            os.remove(f"{self.persist_path}.meta")
+                    except Exception as e:
+                        self._logger.error(f"Failed to delete index files: {str(e)}")
+                        return False
+                
+                return True
+                
+        except Exception as e:
+            self._logger.error(f"Failed to delete collection {name}: {str(e)}")
+            return False
     
     def _save_to_disk(self) -> None:
         """
@@ -430,7 +572,40 @@ class FAISSVectorStore(BaseVectorStore):
             start_id = self._next_id
             end_id = start_id + len(records)
             ids_array = np.array(range(start_id, end_id), dtype=np.int64)
-            self._index.add_with_ids(vectors_array, ids_array)
+            
+            # Add vectors to FAISS index with their IDs
+            try:
+                # Ensure arrays are contiguous and have correct data types
+                if not vectors_array.flags['C_CONTIGUOUS']:
+                    vectors_array = np.ascontiguousarray(vectors_array, dtype=np.float32)
+                if not ids_array.flags['C_CONTIGUOUS']:
+                    ids_array = np.ascontiguousarray(ids_array, dtype=np.int64)
+                
+                # FAISS 1.11.0 add_with_ids expects:
+                # - x: array of vectors, shape (n, d), dtype=float32
+                # - ids: array of IDs, shape (n,), dtype=int64
+                
+                # Ensure vectors are float32 and IDs are int64
+                if vectors_array.dtype != np.float32:
+                    vectors_array = vectors_array.astype(np.float32)
+                if ids_array.dtype != np.int64:
+                    ids_array = ids_array.astype(np.int64)
+                
+                # Call add_with_ids with properly typed arrays
+                self._index.add_with_ids(vectors_array, ids_array)
+                
+            except Exception as e:
+                self._logger.error(f"Error adding vectors to FAISS index: {str(e)}")
+                self._logger.error(f"Vectors shape: {vectors_array.shape}, IDs shape: {ids_array.shape}")
+                self._logger.error(f"Vectors dtype: {vectors_array.dtype}, IDs dtype: {ids_array.dtype}")
+                self._logger.error(f"Index type: {type(self._index).__name__}")
+                if hasattr(self._index, 'index'):
+                    self._logger.error(f"Wrapped index type: {type(self._index.index).__name__}")
+                # Log the actual method signature for debugging
+                import inspect
+                sig = inspect.signature(self._index.add_with_ids)
+                self._logger.error(f"add_with_ids signature: {sig}")
+                raise
             
             # Update records with internal IDs
             for i, record in enumerate(records):

@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from typing import Any, Dict, List, Optional, Union
 from unittest import IsolatedAsyncioTestCase
 
 from semantrix.core.cache import Semantrix
@@ -20,18 +21,50 @@ class MockFailingVectorStore(FAISSVectorStore):
         super().__init__(dimension=dimension)
         self.fail_on = fail_on
         self.calls = []
+        self._collections = ["default"]
     
-    async def add(self, vector, text_id: str):
-        self.calls.append(('add', text_id))
+    async def add(
+        self,
+        vectors: Any,
+        documents: Optional[Union[str, List[str]]] = None,
+        metadatas: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
+        ids: Optional[Union[str, List[str]]] = None,
+        **kwargs: Any
+    ) -> List[str]:
+        """Mock add method that can fail for testing purposes."""
+        self.calls.append(('add', vectors, documents, metadatas, ids, kwargs))
         if self.fail_on == 'add':
             raise RuntimeError("Simulated failure in vector store add")
-        return await super().add(vector, text_id)
+        return await super().add(vectors=vectors, documents=documents, metadatas=metadatas, ids=ids, **kwargs)
     
     async def delete(self, text_id: str):
         self.calls.append(('delete', text_id))
         if self.fail_on == 'delete':
             raise RuntimeError("Simulated failure in vector store delete")
         return await super().delete(text_id)
+        
+    async def create_index(self, index_type: str = "flat", **kwargs) -> bool:
+        """Create or update the vector index."""
+        self.calls.append(('create_index', index_type, kwargs))
+        if self.fail_on == 'create_index':
+            raise RuntimeError("Simulated failure in create_index")
+        return True
+    
+    async def delete_collection(self, name: str, **kwargs) -> bool:
+        """Delete a collection/namespace."""
+        self.calls.append(('delete_collection', name, kwargs))
+        if self.fail_on == 'delete_collection':
+            raise RuntimeError("Simulated failure in delete_collection")
+        if name in self._collections:
+            self._collections.remove(name)
+        return True
+    
+    async def list_collections(self) -> list[str]:
+        """List all collections/namespaces in the store."""
+        self.calls.append(('list_collections',))
+        if self.fail_on == 'list_collections':
+            raise RuntimeError("Simulated failure in list_collections")
+        return self._collections.copy()
 
 class MockFailingCacheStore(InMemoryStore):
     """Mock cache store that fails on specific operations for testing."""
@@ -41,10 +74,28 @@ class MockFailingCacheStore(InMemoryStore):
         self.fail_on = fail_on
         self.calls = []
     
+    async def get_exact(self, prompt: str) -> Optional[str]:
+        self.calls.append(('get_exact', prompt))
+        if self.fail_on == 'get_exact':
+            raise RuntimeError("Simulated failure in cache store get_exact")
+        return await super().get_exact(prompt)
+    
+    async def add(self, prompt: str, response: str) -> None:
+        self.calls.append(('add', prompt))
+        if self.fail_on == 'add':
+            raise RuntimeError("Simulated failure in cache store add")
+        return await super().add(prompt, response)
+    
     async def set(self, key: str, value: str):
+        # First add the call to track it
         self.calls.append(('set', key))
+        
+        # Check if we should fail after tracking the call
         if self.fail_on == 'set':
+            # Don't call the parent's set method to simulate a failure
             raise RuntimeError("Simulated failure in cache store set")
+            
+        # If we get here, call the parent's set method
         return await super().set(key, value)
     
     async def delete(self, key: str):
@@ -52,6 +103,18 @@ class MockFailingCacheStore(InMemoryStore):
         if self.fail_on == 'delete':
             raise RuntimeError("Simulated failure in cache store delete")
         return await super().delete(key)
+    
+    async def enforce_limits(self, resource_limits: Any) -> None:
+        self.calls.append(('enforce_limits', resource_limits))
+        if self.fail_on == 'enforce_limits':
+            raise RuntimeError("Simulated failure in cache store enforce_limits")
+        return await super().enforce_limits(resource_limits)
+    
+    async def clear(self) -> None:
+        self.calls.append(('clear',))
+        if self.fail_on == 'clear':
+            raise RuntimeError("Simulated failure in cache store clear")
+        return await super().clear()
 
 class Test2PCIntegration(IsolatedAsyncioTestCase):
     """Integration tests for Two-Phase Commit in Semantrix cache."""
@@ -63,7 +126,7 @@ class Test2PCIntegration(IsolatedAsyncioTestCase):
             'log_dir': os.path.join(self.temp_dir, 'wal'),
             'max_log_size_mb': 1,
             'batch_size': 10,
-            'flush_interval_seconds': 0.1
+            'batch_timeout_seconds': 0.1
         }
         
         # Create a simple embedder for testing
@@ -74,6 +137,10 @@ class Test2PCIntegration(IsolatedAsyncioTestCase):
             async def embed(self, text: str) -> list[float]:
                 # Simple deterministic embedding for testing
                 return [hash(text) % 100 / 100.0 for _ in range(10)]
+                
+            async def encode(self, texts: list[str]) -> list[list[float]]:
+                # Simple batch encoding for testing
+                return [await self.embed(text) for text in texts]
         
         self.embedder = TestEmbedder()
     
@@ -129,7 +196,8 @@ class Test2PCIntegration(IsolatedAsyncioTestCase):
                 await semantrix.set("test prompt", "test response")
             
             # Verify nothing was added to the vector store
-            self.assertEqual(len(vector_store.calls), 0)
+            results = await vector_store.search(await self.embedder.embed("test prompt"))
+            self.assertFalse(results)  # Should be empty list or None
             
         finally:
             await semantrix.shutdown()
@@ -156,7 +224,7 @@ class Test2PCIntegration(IsolatedAsyncioTestCase):
                 await semantrix.set("test prompt", "test response")
             
             # Verify the operation was rolled back
-            self.assertEqual(len(cache_store.calls), 0)
+            self.assertIsNone(await cache_store.get("test prompt"))
             
         finally:
             await semantrix.shutdown()

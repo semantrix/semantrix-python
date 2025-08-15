@@ -100,6 +100,30 @@ class MemcachedCacheStore(BaseCacheStore):
         This is a no-op since Memcached manages its own eviction.
         """
         pass
+        
+    async def delete(self, key: str) -> bool:
+        """
+        Delete a key from the Memcached cache asynchronously.
+        
+        Args:
+            key: The key to delete
+            
+        Returns:
+            bool: True if the key was found and deleted, False otherwise
+        """
+        cache_key = self._get_key(key)
+        try:
+            if hasattr(self.client, 'delete'):
+                if hasattr(self.client, 'get_multi'):  # aiomcache
+                    # aiomcache delete returns True if key was deleted, False if not found
+                    return await self.client.delete(cache_key.encode('utf-8'))
+                else:  # pymemcache
+                    # pymemcache delete returns True if key was deleted, False if not found
+                    return self.client.delete(cache_key)
+            return False
+        except Exception as e:
+            logger.error(f"Error deleting key from Memcached: {e}")
+            return False
 
     async def clear(self) -> None:
         """Clear all cached items from Memcached asynchronously."""

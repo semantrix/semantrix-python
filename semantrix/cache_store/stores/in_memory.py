@@ -145,7 +145,7 @@ class InMemoryStore(BaseCacheStore):
         self.enable_ttl = enable_ttl
         self.ttl_seconds = ttl_seconds
         self.eviction_interval = eviction_interval
-        self.enable_memory_pressure = enable_memory_pressure
+        self.enable_memory_pressure = enable_memory_pressure and PSUTIL_AVAILABLE
         self.memory_pressure_threshold = memory_pressure_threshold
         self.batch_size = batch_size
         self.sample_size = sample_size
@@ -156,10 +156,12 @@ class InMemoryStore(BaseCacheStore):
         self._running = False
         self._closed = False
         
-        # Initialize metrics
+        # Initialize metrics and memory tracking
+        self.memory_high_watermark = 0.0
         self._metrics = CacheMetrics()
         self._metrics.max_size = max_size
         self._metrics.last_metrics_update = time.time()
+        self._metrics.memory_high_watermark = 0.0
         self._metrics_lock = asyncio.Lock()
         self._last_metrics_update = 0
         self._last_eviction_count = 0
@@ -351,20 +353,36 @@ class InMemoryStore(BaseCacheStore):
         Check current memory pressure level.
         
         Returns:
-            MemoryPressureLevel: The current memory pressure level
+            int: The current memory pressure level (0-3)
         """
-        if not self.enable_memory_pressure or not PSUTIL_AVAILABLE:
+        if not self.enable_memory_pressure:
             return self.MemoryPressureLevel.NONE
             
         try:
+            if not PSUTIL_AVAILABLE:
+                # Fallback to cache size based pressure if psutil not available
+                cache_size = len(self._cache)
+                if cache_size > self.max_size * 0.9:
+                    return self.MemoryPressureLevel.HIGH
+                elif cache_size > self.max_size * 0.7:
+                    return self.MemoryPressureLevel.MEDIUM
+                elif cache_size > self.max_size * 0.5:
+                    return self.MemoryPressureLevel.LOW
+                return self.MemoryPressureLevel.NONE
+                
             rss_mb, available_percent = await self._get_memory_usage()
+            
+            # Update memory high watermark
+            if rss_mb > self.memory_high_watermark:
+                self.memory_high_watermark = rss_mb
+                self._metrics.memory_high_watermark = rss_mb
             
             # Check system-wide memory pressure first
             if available_percent < 5:  # Less than 5% available
                 return self.MemoryPressureLevel.HIGH
             elif available_percent < 15:
                 return self.MemoryPressureLevel.MEDIUM
-            elif available_percent < 30:
+            elif available_percent < 25:
                 return self.MemoryPressureLevel.LOW
                 
             # Check process-specific memory usage
@@ -381,7 +399,15 @@ class InMemoryStore(BaseCacheStore):
             return self.MemoryPressureLevel.NONE
             
         except Exception as e:
-            logger.warning(f"Error checking memory pressure: {e}")
+            logger.warning(f"Failed to check memory pressure: {e}")
+            # Fallback to cache size based pressure on error
+            cache_size = len(self._cache)
+            if cache_size > self.max_size * 0.9:
+                return self.MemoryPressureLevel.HIGH
+            elif cache_size > self.max_size * 0.7:
+                return self.MemoryPressureLevel.MEDIUM
+            elif cache_size > self.max_size * 0.5:
+                return self.MemoryPressureLevel.LOW
             return self.MemoryPressureLevel.NONE
     
     async def _get_eviction_batch_size(self, pressure_level: int) -> int:
@@ -507,110 +533,143 @@ class InMemoryStore(BaseCacheStore):
                         # Small sleep to prevent starving other tasks
                         await asyncio.sleep(0.001)
         
-        # Update metrics
-        duration = (time.time() - start_time) * 1000  # ms
-        if total_evicted > 0:
-            logger.debug(
-                f"TTL eviction: checked {len(sample)} items, evicted {total_evicted} "
-                f"in {duration:.2f}ms"
-            )
-            
-            # Update TTL sampling rate if we found many expired items
-            expiration_rate = len(expired) / len(sample) if sample else 0
-            if expiration_rate > 0.1:  # More than 10% expired in sample
-                self.sample_size = min(
-                    self.sample_size * 2,  # Double sample size
-                    10000  # But cap at 10k
+        try:
+            # Update metrics
+            duration = (time.time() - start_time) * 1000  # ms
+            if total_evicted > 0:
+                logger.debug(
+                    f"TTL eviction: checked {len(sample)} items, evicted {total_evicted} "
+                    f"in {duration:.2f}ms"
                 )
-                logger.debug(f"Increased TTL sample size to {self.sample_size}")
+                
+                # Update TTL sampling rate if we found many expired items
+                expiration_rate = len(expired) / len(sample) if sample else 0
+                if expiration_rate > 0.1:  # More than 10% expired in sample
+                    self.sample_size = min(
+                        self.sample_size * 2,  # Double sample size
+                        10000  # But cap at 10k
+                    )
+                    logger.debug(f"Increased TTL sample size to {self.sample_size}")
+                
+                # Get current memory pressure level
+                pressure_level = await self._check_memory_pressure()
+                
+                # Map memory pressure level to string name
+                pressure_level_names = {
+                    0: 'NONE',
+                    1: 'LOW',
+                    2: 'MEDIUM',
+                    3: 'HIGH'
+                }
+                pressure_name = pressure_level_names.get(pressure_level, 'UNKNOWN')
+                
+                logger.info(
+                    f"Eviction cycle: evicted {total_evicted} items "
+                    f"in {duration:.2f}ms (pressure: {pressure_name})"
+                )
+
+                # Check if we need policy-based eviction
+                needs_eviction = (
+                    len(self._cache) > self.max_size or 
+                    pressure_level > self.MemoryPressureLevel.NONE
+                )
+
+                if needs_eviction:
+                    # Calculate how many items to evict based on pressure
+                    if pressure_level > self.MemoryPressureLevel.NONE:
+                        batch_size = await self._get_eviction_batch_size(pressure_level)
+                        target_size = max(0, len(self._cache) - batch_size)
+                    else:
+                        target_size = self.max_size
+                    
+                    # Ensure we don't go below minimum cache size
+                    target_size = max(0, min(target_size, self.max_size))
+                    
+                    if target_size < len(self._cache):
+                        evicted = await self.eviction_policy.apply(
+                            self._cache, 
+                            max(0, len(self._cache) - target_size)
+                        )
+                        total_evicted += evicted
+                        
+                        if evicted > 0:
+                            logger.info(
+                                f"Evicted {evicted} items due to memory pressure "
+                                f"(new size: {len(self._cache)}/{self.max_size})"
+                            )
+
+                # Update metrics
+                if total_evicted > 0:
+                    duration = (time.time() - start_time) * 1000  # ms
+                    async with self._metrics_lock:
+                        self._metrics.last_eviction_time = time.time()
+                        self._metrics.evictions += total_evicted
+                        self._metrics.policy_evictions += total_evicted
+                        self._metrics.avg_eviction_duration = (
+                            (self._metrics.avg_eviction_duration * 0.9) + (duration * 0.1)
+                        )
+                        self._metrics.memory_high_watermark = max(
+                            self._metrics.memory_high_watermark, 
+                            self._metrics.current_size
+                        )
         
-        self.evictions += total_evicted
+        except Exception as e:
+            logger.error(f"Error during eviction cycle: {e}", exc_info=True)
+        
         return total_evicted
 
     async def _run_eviction_cycle(self) -> int:
         """
-        Run one eviction cycle, returns number of evicted items.
+        Run a single eviction cycle.
         
-        The eviction strategy adapts based on memory pressure levels:
-        - NONE: Only enforce max_size limit with minimal eviction
-        - LOW: Slightly more aggressive eviction
-        - MEDIUM: Moderate eviction to free up memory
-        - HIGH: Aggressive eviction to prevent OOM
+        Returns:
+            int: Number of items evicted in this cycle
         """
-        start_time = time.time()
         total_evicted = 0
         
-        # Check current memory pressure level
+        # Check memory pressure level
         pressure_level = await self._check_memory_pressure()
         
-        # Log memory pressure state
-        if pressure_level != self.MemoryPressureLevel.NONE:
-            logger.info(
-                f"Memory pressure level: {pressure_level.name} "
-                f"(cache size: {len(self._cache)}/{self.max_size})"
-            )
+        # Evict expired items if TTL is enabled
+        if self.enable_ttl:
+            total_evicted += await self._evict_expired_items()
         
-        try:
-            # Always check TTL if enabled
-            if self.enable_ttl:
-                ttl_evicted = await self._evict_expired_items()
-                total_evicted += ttl_evicted
-                if ttl_evicted > 0:
-                    logger.debug(f"Evicted {ttl_evicted} expired items by TTL")
-
-            # Check if we need policy-based eviction
-            needs_eviction = (
-                len(self._cache) > self.max_size or 
-                pressure_level > self.MemoryPressureLevel.NONE
-            )
-
-            if needs_eviction:
-                # Calculate how many items to evict based on pressure
-                if pressure_level > self.MemoryPressureLevel.NONE:
-                    batch_size = await self._get_eviction_batch_size(pressure_level)
-                    target_size = max(0, len(self._cache) - batch_size)
-                else:
-                    target_size = self.max_size
-                
-                # Ensure we don't go below minimum cache size
-                target_size = max(0, min(target_size, self.max_size))
-                
-                if target_size < len(self._cache):
-                    evicted = await self.eviction_policy.apply(
-                        self._cache, 
-                        max(0, len(self._cache) - target_size)
-                    )
-                    total_evicted += evicted
-                    self.evictions += evicted
-                    
-                    if evicted > 0:
-                        logger.info(
-                            f"Evicted {evicted} items due to memory pressure "
-                            f"(new size: {len(self._cache)}/{self.max_size})"
-                        )
-
-            # Update metrics
-            if total_evicted > 0:
-                duration = (time.time() - start_time) * 1000  # ms
-                async with self._metrics_lock:
-                    self._metrics.last_eviction_time = time.time()
-                    self._metrics.evictions += total_evicted
-                    self._metrics.policy_evictions += total_evicted
-                    self._metrics.avg_eviction_duration = (
-                        (self._metrics.avg_eviction_duration * 0.9) + (duration * 0.1)
-                    )
-                    self._metrics.memory_high_watermark = max(
-                        self._metrics.memory_high_watermark, 
-                        self._metrics.current_size
-                    )
-                
-                logger.info(
-                    f"Eviction cycle: evicted {total_evicted} items "
-                    f"in {duration:.2f}ms (pressure: {pressure_level})"
+        # Check if we need to evict more items due to memory pressure or size limits
+        needs_eviction = (
+            len(self._cache) > self.max_size or 
+            pressure_level > self.MemoryPressureLevel.NONE
+        )
+        
+        if needs_eviction:
+            # Calculate how many items to evict based on pressure
+            if pressure_level > self.MemoryPressureLevel.NONE:
+                batch_size = await self._get_eviction_batch_size(pressure_level)
+                target_size = max(0, len(self._cache) - batch_size)
+            else:
+                target_size = self.max_size
+            
+            # Ensure we don't go below minimum cache size
+            target_size = max(0, min(target_size, self.max_size))
+            
+            if target_size < len(self._cache):
+                evicted = await self.eviction_policy.apply(
+                    self._cache, 
+                    max(0, len(self._cache) - target_size)
                 )
-
-        except Exception as e:
-            logger.error(f"Error during eviction cycle: {e}", exc_info=True)
+                total_evicted += evicted
+                
+                if evicted > 0:
+                    logger.info(
+                        f"Evicted {evicted} items due to memory pressure "
+                        f"(new size: {len(self._cache)}/{self.max_size})"
+                    )
+        
+        # Update metrics
+        if total_evicted > 0:
+            async with self._metrics_lock:
+                self._metrics.evictions += total_evicted
+                self._metrics.policy_evictions += total_evicted
+                self._metrics.last_eviction_time = time.time()
         
         return total_evicted
 
@@ -683,6 +742,40 @@ class InMemoryStore(BaseCacheStore):
             return True
         return False
 
+    async def get_exact(self, prompt: str) -> Optional[str]:
+        """
+        Get a cached response if it exists and is not expired.
+
+        Args:
+            prompt: The prompt to look up in the cache.
+
+        Returns:
+            The cached response if found and not expired, None otherwise.
+        """
+        async with self._metrics_lock:
+            if prompt in self._cache:
+                value = self._cache[prompt]
+                if isinstance(value, dict):
+                    # Check for TTL expiration
+                    if 'expires_at' in value and time.time() > value['expires_at']:
+                        del self._cache[prompt]
+                        self._metrics.misses += 1
+                        self._metrics.ttl_evictions += 1
+                        return None
+                    
+                    # Move to end (most recently used)
+                    self._cache.move_to_end(prompt)
+                    self._metrics.hits += 1
+                    return value.get('response')
+                
+                # For backward compatibility with non-dict values
+                self._cache.move_to_end(prompt)
+                self._metrics.hits += 1
+                return value
+            
+            self._metrics.misses += 1
+            return None
+
     async def get(self, key: str) -> Optional[Any]:
         """
         Get an item from the cache.
@@ -692,27 +785,33 @@ class InMemoryStore(BaseCacheStore):
         async with self._metrics_lock:
             if key in self._cache:
                 value = self._cache[key]
-                if isinstance(value, dict) and 'expires_at' in value and time.time() > value['expires_at']:
-                    del self._cache[key]
-                    self._metrics.misses += 1
-                    self._metrics.ttl_evictions += 1
-                    return None
+                if isinstance(value, dict):
+                    # Check for TTL expiration
+                    if 'expires_at' in value and time.time() > value['expires_at']:
+                        del self._cache[key]
+                        self._metrics.misses += 1
+                        self._metrics.ttl_evictions += 1
+                        return None
+                    
+                    # Move to end (most recently used)
+                    self._cache.move_to_end(key)
+                    self._metrics.hits += 1
+                    return value.get('response')
                 
-                # Move to end (most recently used)
+                # For backward compatibility with non-dict values
                 self._cache.move_to_end(key)
                 self._metrics.hits += 1
                 return value
             
             self._metrics.misses += 1
             return None
-        self.misses += 1
-        return None
 
     async def add(self, prompt: str, response: str) -> None:
         if self.enable_ttl:
             self._cache[prompt] = {
                 'response': response,
-                'timestamp': time.time()
+                'timestamp': time.time(),
+                'expires_at': time.time() + self.ttl_seconds
             }
         else:
             self._cache[prompt] = response
@@ -727,6 +826,23 @@ class InMemoryStore(BaseCacheStore):
         evicted_count = await self._run_eviction_cycle()
         if evicted_count > 0:
             logger.info(f"Enforced limits: evicted {evicted_count} items")
+
+    async def delete(self, key: str) -> bool:
+        """
+        Delete a key from the cache.
+
+        Args:
+            key: The key to delete
+            
+        Returns:
+            bool: True if the key was found and deleted, False otherwise
+        """
+        if key in self._cache:
+            del self._cache[key]
+            # Update metrics
+            await self._update_metrics()
+            return True
+        return False
 
     async def clear(self) -> None:
         self._cache.clear()

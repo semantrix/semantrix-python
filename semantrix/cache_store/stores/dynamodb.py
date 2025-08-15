@@ -260,6 +260,35 @@ class DynamoDBCacheStore(BaseCacheStore):
         except Exception as e:
             logger.error(f"Error adding item to DynamoDB cache: {e}")
             raise
+            
+    async def delete(self, key: str) -> bool:
+        """
+        Delete a key from the DynamoDB cache.
+        
+        Args:
+            key: The key to delete
+            
+        Returns:
+            bool: True if the key was found and deleted, False otherwise
+        """
+        try:
+            await self._ensure_connected()
+            
+            # Use delete_item which is idempotent
+            response = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._table.delete_item(
+                    Key={'key': key},
+                    ReturnValues='ALL_OLD'  # Returns the item as it appeared before deletion
+                )
+            )
+            
+            # If Attributes is in the response, the item existed and was deleted
+            return 'Attributes' in response
+            
+        except Exception as e:
+            logger.error(f"Error deleting key from DynamoDB cache: {e}")
+            return False
     
     async def clear(self) -> None:
         """Clear all items from the cache."""

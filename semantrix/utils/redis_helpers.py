@@ -1,6 +1,7 @@
 from typing import Any, Optional
-from semantrix import BaseCacheStore, NoOpEvictionPolicy
-from semantrix.cache_store.stores import RedisCacheStore
+from semantrix.cache_store.base import BaseCacheStore
+from semantrix.cache_store.eviction_policies import NoOpEvictionPolicy
+from semantrix.cache_store.stores.redis import RedisCacheStore
 
 def create_redis_cache_store(redis_client: Any, key_prefix: str = "semantrix:", eviction_policy: Optional[Any] = None) -> BaseCacheStore:
     """

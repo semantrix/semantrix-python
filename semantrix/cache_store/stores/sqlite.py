@@ -174,6 +174,47 @@ class SQLiteCacheStore(BaseCacheStore):
             raise
         finally:
             self._return_connection(conn)
+            
+    async def delete(self, key: str) -> bool:
+        """
+        Delete a key from the SQLite cache.
+        
+        Args:
+            key: The key to delete
+            
+        Returns:
+            bool: True if the key was found and deleted, False otherwise
+        """
+        if self._closed:
+            raise RuntimeError("SQLiteCacheStore is closed")
+            
+        conn = await self._get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            # First check if the key exists
+            cursor.execute(
+                f"SELECT 1 FROM {self.table_name} WHERE key = ?",
+                (key,)
+            )
+            exists = cursor.fetchone() is not None
+            
+            if not exists:
+                return False
+                
+            # Delete the key
+            cursor.execute(
+                f"DELETE FROM {self.table_name} WHERE key = ?",
+                (key,)
+            )
+            conn.commit()
+            return True
+            
+        except sqlite3.Error as e:
+            logger.error(f"Error deleting key from SQLite cache: {e}")
+            return False
+        finally:
+            self._return_connection(conn)
 
     async def clear(self) -> None:
         """Clear all items from the cache."""

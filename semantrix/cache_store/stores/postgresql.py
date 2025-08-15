@@ -229,6 +229,38 @@ class PostgreSQLCacheStore(BaseCacheStore):
         except Exception as e:
             logger.error(f"Error adding item to PostgreSQL cache: {e}")
             raise
+            
+    async def delete(self, key: str) -> bool:
+        """
+        Delete a key from the PostgreSQL cache.
+        
+        Args:
+            key: The key to delete
+            
+        Returns:
+            bool: True if the key was found and deleted, False otherwise
+        """
+        try:
+            await self._ensure_connected()
+            if not self._pool:
+                return False
+                
+            async with self._pool.acquire() as conn:
+                result = await conn.execute(
+                    f"""
+                    DELETE FROM {self.table_name}
+                    WHERE key = $1
+                    RETURNING key
+                    """,
+                    key
+                )
+                
+                # If rows were affected, the key existed and was deleted
+                return result.split()[-1] == '1'  # Returns 'DELETE 1' if successful
+                
+        except Exception as e:
+            logger.error(f"Error deleting key from PostgreSQL cache: {e}")
+            return False
 
     async def clear(self) -> None:
         """Clear all items from the cache."""

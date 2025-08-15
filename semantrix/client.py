@@ -9,10 +9,11 @@ Example:
     cache.set("What is AI?", "Artificial Intelligence is ...")
     print(cache.get("Explain artificial intelligence"))
 """
-from . import Semantrix, ResourceLimits
+from .core.cache import Semantrix
+from .utils.resource_limits import ResourceLimits
 from .utils.resource_limits import DEFAULT_MAX_MEMORY_GB, DEFAULT_MAX_CPU_PERCENT, DEFAULT_MAX_MEMORY_PERCENT
-from .embedding.embedding import BaseEmbedder
-from .vector_store.vector_store import BaseVectorStore
+from .embedding.base import BaseEmbedder
+from .vector_store.base import BaseVectorStore
 from .cache_store.base import BaseCacheStore
 from .models.explain import ExplainResult
 from typing import Optional

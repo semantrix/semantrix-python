@@ -5,16 +5,20 @@ Semantrix - Semantic Caching Library
 A high-performance semantic caching library for AI applications.
 """
 
+__version__ = "0.1.0"
+
 from .core.cache import Semantrix
 from .client import SemantrixClient
 from .utils.resource_limits import ResourceLimits
 from .utils.redis_helpers import create_redis_cache_store
-from .cache_store.redis_store import RedisCacheStore
-from .cache_store.memcached_store import MemcachedCacheStore
+from .cache_store.stores.redis import RedisCacheStore
+from .cache_store.stores.memcached import MemcachedCacheStore
 
 # Export base classes for custom implementations
-from .embedding.embedding import BaseEmbedder, Embedder
-from .vector_store.vector_store import BaseVectorStore, FAISSVectorStore
+from .embedding.base import BaseEmbedder
+from .embedding.embedders.sentence_transformer_embedder import SentenceTransformerEmbedder as Embedder
+from .vector_store.base import BaseVectorStore
+from .vector_store.stores.faiss import FAISSVectorStore
 from .cache_store import (
     BaseCacheStore, 
     InMemoryStore, 
