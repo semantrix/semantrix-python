@@ -18,6 +18,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy
+from semantrix.utils.datetime_utils import utc_now
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -119,9 +120,9 @@ class DynamoDBCacheStore(BaseCacheStore):
     async def _ensure_table_exists(self) -> None:
         """Ensure the DynamoDB table exists and is properly configured."""
         try:
-            # Check if table exists
+            # Check if table exists - FIX: Use keyword arguments
             await asyncio.get_event_loop().run_in_executor(
-                None, self._client.describe_table, {'TableName': self.table_name}
+                None, lambda: self._client.describe_table(TableName=self.table_name)
             )
             logger.debug(f"Using existing DynamoDB table: {self.table_name}")
             
@@ -152,7 +153,7 @@ class DynamoDBCacheStore(BaseCacheStore):
             
             # Create the table
             await asyncio.get_event_loop().run_in_executor(
-                None, self._client.create_table, table_params
+                None, lambda: self._client.create_table(**table_params)
             )
             
             # Wait for table to be active
@@ -169,14 +170,13 @@ class DynamoDBCacheStore(BaseCacheStore):
             if self.ttl_attribute:
                 await asyncio.get_event_loop().run_in_executor(
                     None,
-                    self._client.update_time_to_live,
-                    {
-                        'TableName': self.table_name,
-                        'TimeToLiveSpecification': {
+                    lambda: self._client.update_time_to_live(
+                        TableName=self.table_name,
+                        TimeToLiveSpecification={
                             'Enabled': True,
                             'AttributeName': self.ttl_attribute
                         }
-                    }
+                    )
                 )
             
             logger.info(f"Created DynamoDB table: {self.table_name}")
@@ -221,7 +221,7 @@ class DynamoDBCacheStore(BaseCacheStore):
                     Key={'key': key},
                     UpdateExpression='SET last_accessed = :now, access_count = if_not_exists(access_count, :zero) + :incr',
                     ExpressionAttributeValues={
-                        ':now': datetime.utcnow().isoformat(),
+                        ':now': utc_now().isoformat(),
                         ':zero': 0,
                         ':incr': 1
                     }
@@ -244,8 +244,8 @@ class DynamoDBCacheStore(BaseCacheStore):
             item = {
                 'key': prompt,
                 'value': response,
-                'created_at': datetime.utcnow().isoformat(),
-                'last_accessed': datetime.utcnow().isoformat(),
+                'created_at': utc_now().isoformat(),
+                'last_accessed': utc_now().isoformat(),
                 'access_count': 1
             }
             

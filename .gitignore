@@ -210,3 +210,5 @@ CONTRIBUTING.md
 CLA.md
 TRADEMARK.md
 .github/workflows/cla-check.yml
+
+py.typed

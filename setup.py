@@ -50,7 +50,7 @@ extras_require = {
     # Vector stores
     "faiss": ["faiss-cpu>=1.7.0"],
     "chroma": ["chromadb>=0.4.0"],
-    "pinecone": ["pinecone-client>=2.2.0"],
+    "pinecone": ["pinecone>=2.2.0"],
     "qdrant": ["qdrant-client>=1.1.0"],
     "milvus": ["pymilvus>=2.2.0"],
     

@@ -15,6 +15,8 @@ import logging
 import numpy as np
 import numpy.typing as npt
 
+from semantrix.utils.datetime_utils import utc_now
+
 # Type aliases
 Vector = Union[npt.NDArray[np.float32], List[float]]
 Metadata = Dict[str, Union[str, int, float, bool, List[Union[str, int, float, bool]]]]
@@ -49,8 +51,8 @@ class VectorRecord:
     embedding: npt.NDArray[np.float32]
     metadata: Optional[Metadata] = None
     document: Optional[str] = None  # Original document/text
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
     namespace: Optional[str] = None
     score: Optional[float] = None  # For search results
 

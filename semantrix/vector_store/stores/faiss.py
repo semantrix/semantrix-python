@@ -88,7 +88,9 @@ class FAISSVectorStore(BaseVectorStore):
         self.persist_path = persist_path if persist_on_disk else None
         self._index: Optional[Index] = None
         self._id_to_record: Dict[str, VectorRecord] = {}
-        self._next_id = 0
+        self._string_id_to_int_id: Dict[str, int] = {}  # NEW: Mapping from string IDs to int IDs
+        self._int_id_to_string_id: Dict[int, str] = {}  # NEW: Mapping from int IDs to string IDs
+        self._next_int_id = 0  # NEW: Next available integer ID for FAISS
         self._lock = asyncio.Lock()
         self._index_params = kwargs
         self._is_trained = False
@@ -121,27 +123,24 @@ class FAISSVectorStore(BaseVectorStore):
         else:
             raise ValueError(f"Unsupported distance metric: {self.metric}")
         
-        # Create appropriate index type
+        # Create appropriate index type - use simpler index without ID mapping
         if self.index_type == IndexType.FLAT:
-            self._index = IndexFlatIP(self.dimension) if metric == faiss.METRIC_INNER_PRODUCT else \
+            self._index = faiss.IndexFlatIP(self.dimension) if metric == faiss.METRIC_INNER_PRODUCT else \
                          faiss.IndexFlatL2(self.dimension)
         elif self.index_type == IndexType.IVF:
             nlist = self._index_params.get('nlist', 100)
             quantizer = faiss.IndexFlatL2(self.dimension) if metric == faiss.METRIC_L2 else \
                        faiss.IndexFlatIP(self.dimension)
-            self._index = IndexIVFFlat(quantizer, self.dimension, nlist, metric)
+            self._index = faiss.IndexIVFFlat(quantizer, self.dimension, nlist, metric)
         elif self.index_type == IndexType.HNSW:
             M = self._index_params.get('M', 16)  # Number of connections per layer
-            self._index = IndexHNSWFlat(self.dimension, M, metric)
+            self._index = faiss.IndexHNSWFlat(self.dimension, M, metric)
             self._index.hnsw.ef_construction = self._index_params.get('ef_construction', 200)
             self._index.hnsw.ef_search = self._index_params.get('ef_search', 50)
         else:
             raise ValueError(f"Unsupported index type: {self.index_type}")
         
-        # Wrap with ID mapping to support arbitrary IDs
-        # Only wrap if not already an IndexIDMap (in case of loading from disk)
-        if not isinstance(self._index, IndexIDMap):
-            self._index = IndexIDMap(self._index)
+        # Don't wrap with IndexIDMap - use simple index
         self._is_trained = self.index_type == IndexType.FLAT  # Only Flat index doesn't need training
     
     def _normalize_vector(self, vector: Vector) -> npt.NDArray[np.float32]:
@@ -320,7 +319,9 @@ class FAISSVectorStore(BaseVectorStore):
                 # Clear all data
                 self._init_index()
                 self._id_to_record = {}
-                self._next_id = 0
+                self._string_id_to_int_id = {}  # NEW
+                self._int_id_to_string_id = {}  # NEW
+                self._next_int_id = 0  # NEW
                 
                 # Delete persisted files if they exist
                 if self.persist_path:
@@ -359,17 +360,18 @@ class FAISSVectorStore(BaseVectorStore):
             final_index_path = f"{self.persist_path}.index"
             faiss.write_index(self._index, temp_index_path)
             
-            # Save metadata
-            temp_meta_path = f"{self.persist_path}.meta.tmp"
-            final_meta_path = f"{self.persist_path}.meta"
-            
+            # Save metadata including ID mappings
             metadata = {
+                'id_to_record': self._id_to_record,
+                'string_id_to_int_id': self._string_id_to_int_id,  # NEW
+                'int_id_to_string_id': self._int_id_to_string_id,  # NEW
+                'next_int_id': self._next_int_id,  # NEW
                 'dimension': self.dimension,
                 'metric': self.metric.value,
                 'namespace': self.namespace,
                 'index_type': self.index_type.value,
-                'next_id': self._next_id,
-                'records': [record.to_dict() for record in self._id_to_record.values()]
+                'index_params': self._index_params,
+                'is_trained': self._is_trained
             }
             
             # Write to temp file first
@@ -455,17 +457,10 @@ class FAISSVectorStore(BaseVectorStore):
                 )
             
             # Restore state
-            self._next_id = metadata['next_id']
-            self._id_to_record = {}
-            
-            # Load records with validation
-            for record_data in metadata['records']:
-                try:
-                    record = VectorRecord.from_dict(record_data)
-                    self._id_to_record[record.id] = record
-                except Exception as e:
-                    self._logger.warning(f"Skipping invalid record: {str(e)}")
-            
+            self._id_to_record = metadata.get('id_to_record', {})
+            self._string_id_to_int_id = metadata.get('string_id_to_int_id', {})  # NEW
+            self._int_id_to_string_id = metadata.get('int_id_to_string_id', {})  # NEW
+            self._next_int_id = metadata.get('next_int_id', 0)  # NEW
             self._is_trained = True
             self._logger.info(
                 f"Successfully loaded {len(self._id_to_record)} vectors from {self.persist_path}"
@@ -476,7 +471,9 @@ class FAISSVectorStore(BaseVectorStore):
             # Clean up any partial state
             self._index = None
             self._id_to_record = {}
-            self._next_id = 0
+            self._string_id_to_int_id = {}  # NEW
+            self._int_id_to_string_id = {}  # NEW
+            self._next_int_id = 0  # NEW
             self._is_trained = False
             
             # Reinitialize index
@@ -524,7 +521,7 @@ class FAISSVectorStore(BaseVectorStore):
         if ids is not None and len(ids) != num_vectors:
             raise ValueError("Number of IDs must match number of vectors")
         
-        # Generate IDs if not provided
+        # Generate string IDs if not provided
         if ids is None:
             ids = [str(uuid4()) for _ in range(num_vectors)]
         
@@ -533,13 +530,13 @@ class FAISSVectorStore(BaseVectorStore):
         vectors_to_add = []
         
         for i, vector in enumerate(vectors):
-            vector_id = ids[i]
+            string_id = ids[i]
             document = documents[i] if documents else None
             metadata = metadatas[i] if metadatas else None
             
             # Create record
             record = VectorRecord(
-                id=vector_id,
+                id=string_id,
                 embedding=self._normalize_vector(vector)[0],
                 document=document,
                 metadata=metadata,
@@ -568,49 +565,29 @@ class FAISSVectorStore(BaseVectorStore):
                 self._index.train(train_vectors)
                 self._is_trained = True
             
-            # Add vectors to index
-            start_id = self._next_id
-            end_id = start_id + len(records)
-            ids_array = np.array(range(start_id, end_id), dtype=np.int64)
-            
-            # Add vectors to FAISS index with their IDs
+            # Add vectors to FAISS index (without IDs)
             try:
                 # Ensure arrays are contiguous and have correct data types
                 if not vectors_array.flags['C_CONTIGUOUS']:
                     vectors_array = np.ascontiguousarray(vectors_array, dtype=np.float32)
-                if not ids_array.flags['C_CONTIGUOUS']:
-                    ids_array = np.ascontiguousarray(ids_array, dtype=np.int64)
                 
-                # FAISS 1.11.0 add_with_ids expects:
-                # - x: array of vectors, shape (n, d), dtype=float32
-                # - ids: array of IDs, shape (n,), dtype=int64
-                
-                # Ensure vectors are float32 and IDs are int64
+                # Ensure vectors are float32
                 if vectors_array.dtype != np.float32:
                     vectors_array = vectors_array.astype(np.float32)
-                if ids_array.dtype != np.int64:
-                    ids_array = ids_array.astype(np.int64)
                 
-                # Call add_with_ids with properly typed arrays
-                self._index.add_with_ids(vectors_array, ids_array)
+                # Use simple add method without IDs
+                self._index.add(vectors_array)
                 
             except Exception as e:
                 self._logger.error(f"Error adding vectors to FAISS index: {str(e)}")
-                self._logger.error(f"Vectors shape: {vectors_array.shape}, IDs shape: {ids_array.shape}")
-                self._logger.error(f"Vectors dtype: {vectors_array.dtype}, IDs dtype: {ids_array.dtype}")
+                self._logger.error(f"Vectors shape: {vectors_array.shape}")
+                self._logger.error(f"Vectors dtype: {vectors_array.dtype}")
                 self._logger.error(f"Index type: {type(self._index).__name__}")
-                if hasattr(self._index, 'index'):
-                    self._logger.error(f"Wrapped index type: {type(self._index.index).__name__}")
-                # Log the actual method signature for debugging
-                import inspect
-                sig = inspect.signature(self._index.add_with_ids)
-                self._logger.error(f"add_with_ids signature: {sig}")
                 raise
             
-            # Update records with internal IDs
-            for i, record in enumerate(records):
+            # Update records with string IDs
+            for record in records:
                 self._id_to_record[record.id] = record
-                self._next_id = max(self._next_id, ids_array[i] + 1)
             
             # Save to disk if configured
             if self.persist_path:
@@ -655,21 +632,23 @@ class FAISSVectorStore(BaseVectorStore):
             if not filtered_records:
                 return []
                 
-            # Get filtered IDs
-            filtered_ids = [i for i, record in enumerate(self._id_to_record.values()) 
-                          if record in filtered_records]
+            # NEW: Get filtered integer IDs for FAISS
+            filtered_int_ids = []
+            for record in filtered_records:
+                if record.id in self._string_id_to_int_id:
+                    filtered_int_ids.append(self._string_id_to_int_id[record.id])
             
-            if not filtered_ids:
+            if not filtered_int_ids:
                 return []
                 
             # Create ID selector
             selector = faiss.IDSelectorBatch(
-                len(filtered_ids),
-                faiss.swig_ptr(np.array(filtered_ids, dtype=np.int64))
+                len(filtered_int_ids),
+                faiss.swig_ptr(np.array(filtered_int_ids, dtype=np.int64))
             )
             
             # Search with filter
-            k = min(k, len(filtered_ids))
+            k = min(k, len(filtered_int_ids))
             distances, indices = self._index.search(
                 query_vector_np, 
                 k, 
@@ -683,27 +662,25 @@ class FAISSVectorStore(BaseVectorStore):
         # Convert to results
         results: List[QueryResult] = []
         
-        for i, (distance, idx) in enumerate(zip(distances[0], indices[0])):
-            if idx < 0:  # Skip invalid indices
+        for i, (distance, int_idx) in enumerate(zip(distances[0], indices[0])):
+            if int_idx < 0:  # Skip invalid indices
                 continue
                 
-            # Get record by internal ID
-            record = next((r for r in self._id_to_record.values() if r.id == str(idx)), None)
-            if not record:
-                continue
+            # NEW: Convert integer ID back to string ID
+            if int_idx in self._int_id_to_string_id:
+                string_id = self._int_id_to_string_id[int_idx]
+                record = self._id_to_record.get(string_id)
                 
-            # Create result
-            result: QueryResult = {
-                'id': record.id,
-                'document': record.document,
-                'metadata': record.metadata if include_metadata else None,
-                'score': self._denormalize_score(float(distance)),
-                'vector': record.embedding if include_vectors else None
-            }
-            results.append(result)
+                if record is not None:
+                    result = QueryResult(
+                        id=string_id,
+                        score=self._denormalize_score(distance),
+                        vector=record.embedding if include_vectors else None,
+                        metadata=record.metadata if include_metadata else None,
+                        document=record.document if include_metadata else None
+                    )
+                    results.append(result)
         
-        # Sort by score (descending)
-        results.sort(key=lambda x: x['score'], reverse=True)
         return results
     
     async def get(
@@ -817,11 +794,11 @@ class FAISSVectorStore(BaseVectorStore):
                     record.embedding = new_vector
                     
                     # Update in FAISS index
-                    idx = int(id)  # Assuming ID maps to internal index
-                    self._index.remove_ids(np.array([idx], dtype=np.int64))
+                    int_id = self._string_id_to_int_id[id] # Get integer ID
+                    self._index.remove_ids(np.array([int_id], dtype=np.int64))
                     self._index.add_with_ids(
                         new_vector.reshape(1, -1),
-                        np.array([idx], dtype=np.int64)
+                        np.array([int_id], dtype=np.int64)
                     )
                 
                 # Update document if provided
@@ -891,13 +868,23 @@ class FAISSVectorStore(BaseVectorStore):
             if self._index is None:
                 raise RuntimeError("FAISS index not initialized")
                 
+            # NEW: Convert string IDs to integer IDs for FAISS deletion
+            int_ids_to_delete = []
+            for string_id in ids_to_delete:
+                if string_id in self._string_id_to_int_id:
+                    int_ids_to_delete.append(self._string_id_to_int_id[string_id])
+            
             # Remove from FAISS index
-            internal_ids = [int(id) for id in ids_to_delete]
-            self._index.remove_ids(np.array(internal_ids, dtype=np.int64))
+            self._index.remove_ids(np.array(int_ids_to_delete, dtype=np.int64))
             
             # Remove from records
             for id in ids_to_delete:
                 self._id_to_record.pop(id, None)
+                # Also remove from ID mappings if they were deleted
+                if id in self._string_id_to_int_id:
+                    int_id = self._string_id_to_int_id[id]
+                    del self._string_id_to_int_id[id]
+                    del self._int_id_to_string_id[int_id]
             
             # Save to disk if configured
             if self.persist_path:
@@ -926,7 +913,9 @@ class FAISSVectorStore(BaseVectorStore):
         async with self._lock:
             self._init_index()
             self._id_to_record = {}
-            self._next_id = 0
+            self._string_id_to_int_id = {}  # NEW
+            self._int_id_to_string_id = {}  # NEW
+            self._next_int_id = 0  # NEW
             
             if self.persist_path and os.path.exists(f"{self.persist_path}.index"):
                 try:
@@ -987,12 +976,23 @@ class FAISSVectorStore(BaseVectorStore):
         This resets the FAISS index and clears all stored responses.
         """
         async with self._lock:
-            self.index = faiss.IndexFlatIP(self.dimension)
-            self.responses = []
+            self._init_index()
+            self._id_to_record = {}
+            self._string_id_to_int_id = {}  # NEW
+            self._int_id_to_string_id = {}  # NEW
+            self._next_int_id = 0  # NEW
+            
+            if self.persist_path and os.path.exists(f"{self.persist_path}.index"):
+                # Delete persisted files
+                try:
+                    os.remove(f"{self.persist_path}.index")
+                    os.remove(f"{self.persist_path}.meta")
+                except OSError:
+                    pass  # Files might not exist
     
     async def size(self) -> int:
         """Get the number of stored embeddings."""
-        return len(self.responses)
+        return len(self._id_to_record)
         
     async def __aenter__(self):
         """Async context manager entry."""

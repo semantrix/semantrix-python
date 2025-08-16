@@ -205,7 +205,7 @@ class Test2PCIntegration(IsolatedAsyncioTestCase):
     async def test_cache_store_failure_during_2pc(self):
         """Test 2PC rollback when cache store fails during commit."""
         # Create a failing cache store
-        cache_store = MockFailingCacheStore(fail_on='set')
+        cache_store = MockFailingCacheStore(fail_on='add')
         
         # Create Semantrix with the failing cache store
         semantrix = Semantrix(

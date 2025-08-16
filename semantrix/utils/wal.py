@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from tenacity import retry, stop_after_attempt, wait_exponential
+from semantrix.utils.datetime_utils import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +102,7 @@ class WriteAheadLog:
             
         log_entry = {
             "request_id": request_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_now().isoformat(),
             "operation": op_type.value,
             "status": LogStatus.PENDING.value,
             "data": data,
@@ -195,7 +196,7 @@ class WriteAheadLog:
         """Update the status of a logged operation."""
         log_entry = {
             "request_id": request_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_now().isoformat(),
             "status": status.value,
             "operation": "STATUS_UPDATE",
             "original_request_id": request_id,
@@ -264,7 +265,7 @@ class WriteAheadLog:
             self.current_log_fd.close()
             
         # Create new log file with timestamp
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        timestamp = utc_now().strftime("%Y%m%d_%H%M%S")
         self.current_log_file = self.log_dir / f"wal_{timestamp}.log"
         
         # Open new log file

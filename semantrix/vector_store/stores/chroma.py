@@ -15,6 +15,7 @@ from chromadb.config import Settings as ChromaSettings
 from ..base import (
     BaseVectorStore,
     DistanceMetric,
+    IndexType,
     Metadata,
     MetadataFilter,
     QueryResult,
@@ -417,3 +418,73 @@ class ChromaVectorStore(BaseVectorStore):
             self._client.heartbeat()  # Ensure any pending writes are flushed
             self._client = None
         self._collection = None
+
+    async def create_index(
+        self,
+        index_type: IndexType = IndexType.FLAT,
+        metric: Optional[DistanceMetric] = None,
+        **kwargs: Any
+    ) -> bool:
+        """
+        Create or update the vector index.
+        
+        Note: ChromaDB handles index creation automatically, so this is a no-op.
+        """
+        try:
+            # ChromaDB creates indexes automatically, so we just ensure the collection exists
+            if self._collection is None:
+                self._init_collection()
+            return True
+        except Exception as e:
+            self._logger.error(f"Error creating index: {e}")
+            return False
+    
+    async def get_index_info(self) -> Dict[str, Any]:
+        """Get information about the current index."""
+        try:
+            if self._collection is None:
+                return {"error": "No collection initialized"}
+            
+            # Get collection info
+            collection_info = self._collection.get()
+            return {
+                "collection_name": self._collection.name,
+                "count": len(collection_info.get("ids", [])),
+                "metadata": collection_info.get("metadatas", []),
+                "dimension": self.dimension,
+                "metric": self._chroma_metric
+            }
+        except Exception as e:
+            self._logger.error(f"Error getting index info: {e}")
+            return {"error": str(e)}
+    
+    async def list_collections(self) -> List[str]:
+        """List all collections in the store."""
+        try:
+            collections = self._client.list_collections()
+            return [col.name for col in collections]
+        except Exception as e:
+            self._logger.error(f"Error listing collections: {e}")
+            return []
+    
+    async def delete_collection(self, name: str, **kwargs: Any) -> bool:
+        """Delete a collection."""
+        try:
+            self._client.delete_collection(name=name)
+            return True
+        except Exception as e:
+            self._logger.error(f"Error deleting collection {name}: {e}")
+            return False
+    
+    async def count(self, filter: Optional[MetadataFilter] = None) -> int:
+        """Count the number of vectors matching the filter."""
+        try:
+            if self._collection is None:
+                return 0
+            
+            # Get all documents and count them
+            result = self._collection.get()
+            return len(result.get("ids", []))
+        except Exception as e:
+            self._logger.error(f"Error counting vectors: {e}")
+            return 0

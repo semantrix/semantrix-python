@@ -16,6 +16,7 @@ from pymongo.collection import Collection
 from pymongo.errors import PyMongoError
 
 from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy
+from semantrix.utils.datetime_utils import utc_now
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -152,27 +153,31 @@ class MongoDBCacheStore(BaseCacheStore):
             if not self._collection:
                 return None
                 
+            # Find documents that haven't expired
+            filter_query = {
+                "key": prompt, "$or": [
+                    {"expires_at": {"$exists": False}},
+                    {"expires_at": {"$gt": utc_now()}}
+                ]
+            }
+
             # Find the document by key
             doc = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self._collection.find_one(
-                    {"key": prompt, "$or": [
-                        {"expires_at": {"$exists": False}},
-                        {"expires_at": {"$gt": datetime.utcnow()}}
-                    ]}
-                )
+                lambda: self._collection.find_one(filter_query)
             )
             
             if doc:
                 # Update last accessed time
+                update_data = {
+                    "$inc": {"access_count": 1},
+                    "$set": {"last_accessed_at": utc_now()}
+                }
                 await asyncio.get_event_loop().run_in_executor(
                     None,
                     lambda: self._collection.update_one(
                         {"_id": doc["_id"]},
-                        {
-                            "$inc": {"access_count": 1},
-                            "$set": {"last_accessed_at": datetime.utcnow()}
-                        }
+                        update_data
                     )
                 )
                 return doc.get("value")
@@ -190,13 +195,10 @@ class MongoDBCacheStore(BaseCacheStore):
             if not self._collection:
                 raise RuntimeError("MongoDB collection not available")
                 
-            now = datetime.utcnow()
+            now = utc_now()
             expires_at = (
                 now + timedelta(seconds=ttl) 
-                if ttl is not None 
-                else (now + timedelta(seconds=self.ttl_seconds) 
-                      if self.ttl_seconds is not None 
-                      else None)
+                if ttl is not None else None
             )
             
             document = {
@@ -278,7 +280,7 @@ class MongoDBCacheStore(BaseCacheStore):
                 lambda: self._collection.count_documents({
                     "$or": [
                         {"expires_at": {"$exists": False}},
-                        {"expires_at": {"$gt": datetime.utcnow()}}
+                        {"expires_at": {"$gt": utc_now()}}
                     ]
                 })
             )

@@ -249,6 +249,8 @@ class Semantrix:
     
     async def shutdown(self):
         """Gracefully shutdown the cache and its components."""
+        await self.cache_store.close()
+        await self.vector_store.close()
         if self.wal:
             await self.wal.shutdown()
     
