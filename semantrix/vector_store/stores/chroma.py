@@ -14,6 +14,8 @@ import numpy as np
 from chromadb import Client, Collection
 from chromadb.config import Settings as ChromaSettings
 
+from semantrix.exceptions import VectorOperationError
+
 from ..base import (
     BaseVectorStore,
     DistanceMetric,
@@ -133,7 +135,7 @@ class ChromaVectorStore(BaseVectorStore):
             self._logger.info(f"Initialized Chroma collection: {collection_name}")
         except Exception as e:
             self._logger.error(f"Failed to initialize Chroma collection: {str(e)}")
-            raise
+            raise VectorOperationError(f"Failed to initialize Chroma collection: {e}") from e
     
     async def add(
         self,
@@ -192,13 +194,17 @@ class ChromaVectorStore(BaseVectorStore):
             documents = [doc if doc is not None else "" for doc in documents]
         
         def _add_chroma():
-            self._collection.add(
-                embeddings=vectors_array,
-                documents=documents,  # Pass documents directly
-                metadatas=metadatas,
-                ids=ids
-            )
-        
+            try:
+                self._collection.add(
+                    embeddings=vectors_array,
+                    documents=documents,
+                    metadatas=metadatas,
+                    ids=ids
+                )
+            except Exception as e:
+                self._logger.error(f"Error adding vectors to ChromaDB: {e}")
+                raise VectorOperationError("Failed to add vectors to ChromaDB") from e
+
         await asyncio.get_event_loop().run_in_executor(None, _add_chroma)
         
         return ids
@@ -310,7 +316,11 @@ class ChromaVectorStore(BaseVectorStore):
             
             return results
         
-        return await asyncio.get_event_loop().run_in_executor(None, _get_from_chroma)
+        try:
+            return await asyncio.get_event_loop().run_in_executor(None, _get_from_chroma)
+        except Exception as e:
+            self._logger.error(f"Error getting records from ChromaDB: {e}")
+            raise VectorOperationError("Failed to get records from ChromaDB") from e
     
     async def search(
         self,
@@ -357,7 +367,7 @@ class ChromaVectorStore(BaseVectorStore):
                 return query_results
             except Exception as e:
                 self._logger.error(f"Error searching ChromaDB: {e}")
-                raise
+                raise VectorOperationError("Failed to search in ChromaDB") from e
         
         return await asyncio.get_event_loop().run_in_executor(None, _search_chroma)
     
@@ -371,7 +381,7 @@ class ChromaVectorStore(BaseVectorStore):
     ) -> bool:
         """Update vectors in the store."""
         if not self._collection:
-            raise RuntimeError("Collection not initialized")
+            raise VectorOperationError("Collection not initialized")
         
         # Ensure ids is a list
         if not isinstance(ids, list):
@@ -424,8 +434,12 @@ class ChromaVectorStore(BaseVectorStore):
                 metadatas=metadatas
             )
         
-        await asyncio.get_event_loop().run_in_executor(None, _update_chroma)
-        return True
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, _update_chroma)
+            return True
+        except Exception as e:
+            self._logger.error(f"Error updating vectors in ChromaDB: {e}")
+            raise VectorOperationError("Failed to update vectors in ChromaDB") from e
     
     async def delete(
         self,
@@ -459,7 +473,11 @@ class ChromaVectorStore(BaseVectorStore):
                     len(results["ids"]) > 0):
                     self._collection.delete(ids=results["ids"])
         
-        await asyncio.get_event_loop().run_in_executor(None, _delete_from_chroma)
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, _delete_from_chroma)
+        except Exception as e:
+            self._logger.error(f"Error deleting vectors from ChromaDB: {e}")
+            raise VectorOperationError("Failed to delete vectors from ChromaDB") from e
     
     async def create_index(
         self,
@@ -476,7 +494,7 @@ class ChromaVectorStore(BaseVectorStore):
                 return True
             except Exception as e:
                 self._logger.error(f"Error creating index: {e}")
-                return False
+                raise VectorOperationError("Failed to create index in ChromaDB") from e
         
         return await asyncio.get_event_loop().run_in_executor(None, _create_index)
     
@@ -485,7 +503,7 @@ class ChromaVectorStore(BaseVectorStore):
         def _get_index_info():
             try:
                 if self._collection is None:
-                    return {"error": "No collection initialized"}
+                    raise VectorOperationError("No collection initialized")
                 
                 # Get collection info
                 collection_info = self._collection.get()
@@ -498,7 +516,7 @@ class ChromaVectorStore(BaseVectorStore):
                 }
             except Exception as e:
                 self._logger.error(f"Error getting index info: {e}")
-                return {"error": str(e)}
+                raise VectorOperationError("Failed to get index info from ChromaDB") from e
         
         return await asyncio.get_event_loop().run_in_executor(None, _get_index_info)
     
@@ -510,7 +528,7 @@ class ChromaVectorStore(BaseVectorStore):
                 return [col.name for col in collections]
             except Exception as e:
                 self._logger.error(f"Error listing collections: {e}")
-                return []
+                raise VectorOperationError("Failed to list collections from ChromaDB") from e
         
         return await asyncio.get_event_loop().run_in_executor(None, _list_collections)
     
@@ -522,7 +540,7 @@ class ChromaVectorStore(BaseVectorStore):
                 return True
             except Exception as e:
                 self._logger.error(f"Error deleting collection {name}: {e}")
-                return False
+                raise VectorOperationError(f"Failed to delete collection {name}") from e
         
         return await asyncio.get_event_loop().run_in_executor(None, _delete_collection)
     
@@ -538,13 +556,17 @@ class ChromaVectorStore(BaseVectorStore):
                 return len(result.get("ids", []))
             except Exception as e:
                 self._logger.error(f"Error counting vectors: {e}")
-            return 0
+                raise VectorOperationError("Failed to count vectors in ChromaDB") from e
         
         return await asyncio.get_event_loop().run_in_executor(None, _count)
     
     async def reset(self) -> None:
         if self._collection is not None:
-            self._collection.delete(where={})  # Delete all records
+            try:
+                self._collection.delete(where={})  # Delete all records
+            except Exception as e:
+                self._logger.error(f"Error resetting collection: {e}")
+                raise VectorOperationError("Failed to reset ChromaDB collection") from e
     
     async def close(self) -> None:
         """Close the Chroma client and release resources."""

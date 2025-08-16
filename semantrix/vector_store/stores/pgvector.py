@@ -21,6 +21,8 @@ except ImportError:
 
 import numpy as np
 
+from semantrix.exceptions import VectorOperationError
+
 from ..base import (
     BaseVectorStore,
     DistanceMetric,
@@ -60,7 +62,7 @@ class PgVectorStore(BaseVectorStore):
         self._logger = logging.getLogger(__name__)
         
         if not PGVECTOR_AVAILABLE:
-            raise ImportError(
+            raise VectorOperationError(
                 "The 'psycopg2-binary' package is required for PgVectorStore. "
                 "Please install it with: pip install psycopg2-binary numpy"
             )
@@ -85,17 +87,17 @@ class PgVectorStore(BaseVectorStore):
             with self._connection.cursor() as cur:
                 cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
                 self._connection.commit()
-        except Exception as e:
+        except psycopg2.Error as e:
             self._logger.error(f"Failed to connect to PostgreSQL: {str(e)}")
             if self._connection:
                 self._connection.close()
                 self._connection = None
-            raise
+            raise VectorOperationError("Failed to connect to PostgreSQL") from e
     
     def _ensure_table(self) -> None:
         """Ensure the vectors table exists."""
         if not self._connection:
-            raise RuntimeError("Database connection not initialized")
+            raise VectorOperationError("Database connection not initialized")
         
         try:
             with self._connection.cursor() as cur:
@@ -134,10 +136,10 @@ class PgVectorStore(BaseVectorStore):
                 self._connection.commit()
                 self._logger.info(f"Ensured table {self.table_name} exists with vector index")
                 
-        except Exception as e:
+        except psycopg2.Error as e:
             self._connection.rollback()
             self._logger.error(f"Failed to ensure table exists: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to ensure table exists") from e
     
     @classmethod
     def from_connection_params(
@@ -188,7 +190,7 @@ class PgVectorStore(BaseVectorStore):
     ) -> List[str]:
         """Add vectors to the store."""
         if not self._connection:
-            raise RuntimeError("Database connection not initialized")
+            raise VectorOperationError("Database connection not initialized")
             
         # Convert inputs to lists for batch processing
         is_single = not isinstance(vectors, list)
@@ -249,10 +251,10 @@ class PgVectorStore(BaseVectorStore):
                 self._connection.commit()
                 return ids
                 
-        except Exception as e:
+        except psycopg2.Error as e:
             self._connection.rollback()
             self._logger.error(f"Failed to add vectors to pgvector: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to add vectors to pgvector") from e
     
     async def get(
         self,
@@ -263,7 +265,7 @@ class PgVectorStore(BaseVectorStore):
     ) -> List[VectorRecord]:
         """Get vectors from the store."""
         if not self._connection:
-            raise RuntimeError("Database connection not initialized")
+            raise VectorOperationError("Database connection not initialized")
             
         # Convert single ID to list
         if ids is not None and not isinstance(ids, list):
@@ -294,18 +296,6 @@ class PgVectorStore(BaseVectorStore):
                         elif op == "$ne":
                             conditions.append(f"metadata->>%s != %s")
                             params.extend([key, str(op_value)])
-                        elif op in ["$gt", "$gte", "$lt", "$lte"]:
-                            conditions.append(f"(metadata->>%s)::numeric {op} %s")
-                            params.extend([key, str(op_value)])
-                        elif op == "$in":
-                            if not isinstance(op_value, (list, tuple)):
-                                raise ValueError("$in operator requires a list value")
-                            placeholders = ", ".join(["%s"] * len(op_value))
-                            conditions.append(f"metadata->>%s IN ({placeholders})")
-                            params.extend([key] + [str(v) for v in op_value])
-                else:
-                    # Default to equality check
-                    conditions.append("metadata->>%s = %s")
                     params.extend([key, str(value)])
         
         # Build the query
@@ -344,9 +334,9 @@ class PgVectorStore(BaseVectorStore):
                 
                 return results
                 
-        except Exception as e:
+        except psycopg2.Error as e:
             self._logger.error(f"Failed to get vectors from pgvector: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to get vectors from pgvector") from e
     
     async def search(
         self,
@@ -357,7 +347,7 @@ class PgVectorStore(BaseVectorStore):
     ) -> List[QueryResult]:
         """Search for similar vectors."""
         if not self._connection:
-            raise RuntimeError("Database connection not initialized")
+            raise VectorOperationError("Database connection not initialized")
             
         # Convert query vector to list if it's a numpy array
         query_vec = query_vector.tolist() if hasattr(query_vector, 'tolist') else list(query_vector)
@@ -387,7 +377,7 @@ class PgVectorStore(BaseVectorStore):
                             params.extend([key, str(op_value)])
                         elif op == "$in":
                             if not isinstance(op_value, (list, tuple)):
-                                raise ValueError("$in operator requires a list value")
+                                raise VectorOperationError("$in operator requires a list value")
                             placeholders = ", ".join(["%s"] * len(op_value))
                             conditions.append(f"metadata->>%s IN ({placeholders})")
                             params.extend([key] + [str(v) for v in op_value])
@@ -437,9 +427,9 @@ class PgVectorStore(BaseVectorStore):
                 
                 return results
                 
-        except Exception as e:
+        except psycopg2.Error as e:
             self._logger.error(f"Failed to search vectors in pgvector: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to search vectors in pgvector") from e
     
     async def update(
         self,
@@ -451,7 +441,7 @@ class PgVectorStore(BaseVectorStore):
     ) -> None:
         """Update vectors in the store."""
         if not self._connection:
-            raise RuntimeError("Database connection not initialized")
+            raise VectorOperationError("Database connection not initialized")
             
         # Convert inputs to lists
         if not isinstance(ids, list):
@@ -515,10 +505,10 @@ class PgVectorStore(BaseVectorStore):
                     )
                     self._connection.commit()
                     
-            except Exception as e:
+            except psycopg2.Error as e:
                 self._connection.rollback()
                 self._logger.error(f"Failed to update vectors in pgvector: {str(e)}")
-                raise
+                raise VectorOperationError("Failed to update vectors in pgvector") from e
     
     async def delete(
         self,
@@ -528,7 +518,7 @@ class PgVectorStore(BaseVectorStore):
     ) -> None:
         """Delete vectors from the store."""
         if not self._connection:
-            raise RuntimeError("Database connection not initialized")
+            raise VectorOperationError("Database connection not initialized")
             
         # If neither IDs nor filter provided, delete all vectors
         if ids is None and filter is None:
@@ -550,10 +540,10 @@ class PgVectorStore(BaseVectorStore):
                     self._connection.commit()
                     return
                     
-            except Exception as e:
+            except psycopg2.Error as e:
                 self._connection.rollback()
                 self._logger.error(f"Failed to delete all vectors from pgvector: {str(e)}")
-                raise
+                raise VectorOperationError("Failed to delete all vectors from pgvector") from e
         
         # Build WHERE conditions for targeted delete
         conditions = []
@@ -587,7 +577,7 @@ class PgVectorStore(BaseVectorStore):
                             params.extend([key, str(op_value)])
                         elif op == "$in":
                             if not isinstance(op_value, (list, tuple)):
-                                raise ValueError("$in operator requires a list value")
+                                raise VectorOperationError("$in operator requires a list value")
                             placeholders = ", ".join(["%s"] * len(op_value))
                             conditions.append(f"metadata->>%s IN ({placeholders})")
                             params.extend([key] + [str(v) for v in op_value])
@@ -607,15 +597,15 @@ class PgVectorStore(BaseVectorStore):
                     cur.execute(query, params)
                     self._connection.commit()
                     
-            except Exception as e:
+            except psycopg2.Error as e:
                 self._connection.rollback()
                 self._logger.error(f"Failed to delete vectors from pgvector: {str(e)}")
-                raise
+                raise VectorOperationError("Failed to delete vectors from pgvector") from e
     
     async def count(self, **kwargs: Any) -> int:
         """Count the number of vectors in the store."""
         if not self._connection:
-            raise RuntimeError("Database connection not initialized")
+            raise VectorOperationError("Database connection not initialized")
             
         try:
             with self._connection.cursor() as cur:
@@ -629,14 +619,14 @@ class PgVectorStore(BaseVectorStore):
                 cur.execute(query, params)
                 return cur.fetchone()[0]
                 
-        except Exception as e:
+        except psycopg2.Error as e:
             self._logger.error(f"Failed to count vectors in pgvector: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to count vectors in pgvector") from e
     
     async def reset(self, **kwargs: Any) -> None:
         """Reset the vector store by dropping and recreating the table."""
         if not self._connection:
-            raise RuntimeError("Database connection not initialized")
+            raise VectorOperationError("Database connection not initialized")
             
         try:
             with self._connection.cursor() as cur:
@@ -651,10 +641,10 @@ class PgVectorStore(BaseVectorStore):
                 self._ensure_table()
                 self._connection.commit()
                 
-        except Exception as e:
+        except psycopg2.Error as e:
             self._connection.rollback()
             self._logger.error(f"Failed to reset pgvector store: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to reset pgvector store") from e
     
     async def close(self, **kwargs: Any) -> None:
         """Close the database connection."""

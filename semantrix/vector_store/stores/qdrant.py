@@ -25,6 +25,8 @@ try:
 except ImportError:
     QDRANT_AVAILABLE = False
 
+from semantrix.exceptions import VectorOperationError
+
 from ..base import (
     BaseVectorStore,
     DistanceMetric,
@@ -85,7 +87,7 @@ class QdrantVectorStore(BaseVectorStore):
         self._logger = logging.getLogger(__name__)
         
         if not QDRANT_AVAILABLE:
-            raise ImportError(
+            raise VectorOperationError(
                 "The 'qdrant-client' package is required for QdrantVectorStore. "
                 "Please install it with: pip install qdrant-client"
             )
@@ -134,7 +136,7 @@ class QdrantVectorStore(BaseVectorStore):
                 
         except Exception as e:
             self._logger.error(f"Failed to initialize Qdrant: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to initialize Qdrant") from e
     
     def _get_qdrant_metric(self) -> QdrantDistance:
         """Convert our DistanceMetric to Qdrant's Distance enum."""
@@ -221,7 +223,7 @@ class QdrantVectorStore(BaseVectorStore):
     ) -> List[str]:
         """Add vectors to the store."""
         if self._client is None:
-            raise RuntimeError("Qdrant client not initialized")
+            raise VectorOperationError("Qdrant client not initialized")
             
         # Convert inputs to lists for batch processing
         is_single = not isinstance(vectors, list)
@@ -271,7 +273,7 @@ class QdrantVectorStore(BaseVectorStore):
             return ids
         except Exception as e:
             self._logger.error(f"Failed to add vectors to Qdrant: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to add vectors to Qdrant") from e
     
     async def get(
         self,
@@ -282,7 +284,7 @@ class QdrantVectorStore(BaseVectorStore):
     ) -> List[VectorRecord]:
         """Get vectors by IDs or filter."""
         if self._client is None:
-            return []
+            raise VectorOperationError("Qdrant client not initialized")
             
         results: List[VectorRecord] = []
         
@@ -344,7 +346,7 @@ class QdrantVectorStore(BaseVectorStore):
                     
         except Exception as e:
             self._logger.error(f"Failed to get vectors from Qdrant: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to get vectors from Qdrant") from e
             
         return results
     
@@ -422,7 +424,7 @@ class QdrantVectorStore(BaseVectorStore):
     ) -> List[QueryResult]:
         """Search for similar vectors."""
         if self._client is None:
-            return []
+            raise VectorOperationError("Qdrant client not initialized")
             
         try:
             query_vector_list = query_vector.tolist() if hasattr(query_vector, 'tolist') else list(query_vector)
@@ -464,7 +466,7 @@ class QdrantVectorStore(BaseVectorStore):
             
         except Exception as e:
             self._logger.error(f"Search failed: {str(e)}")
-            raise
+            raise VectorOperationError("Search failed in Qdrant") from e
     
     async def update(
         self,
@@ -476,7 +478,7 @@ class QdrantVectorStore(BaseVectorStore):
     ) -> None:
         """Update vectors in the store."""
         if self._client is None:
-            raise RuntimeError("Qdrant client not initialized")
+            raise VectorOperationError("Qdrant client not initialized")
             
         # Convert inputs to lists
         if isinstance(ids, str):
@@ -541,7 +543,7 @@ class QdrantVectorStore(BaseVectorStore):
                 )
             except Exception as e:
                 self._logger.error(f"Failed to update vectors in Qdrant: {str(e)}")
-                raise
+                raise VectorOperationError("Failed to update vectors in Qdrant") from e
     
     async def delete(
         self,
@@ -551,7 +553,7 @@ class QdrantVectorStore(BaseVectorStore):
     ) -> None:
         """Delete vectors by IDs or filter."""
         if self._client is None:
-            return
+            raise VectorOperationError("Qdrant client not initialized")
             
         try:
             if ids is not None:
@@ -573,24 +575,24 @@ class QdrantVectorStore(BaseVectorStore):
                     )
         except Exception as e:
             self._logger.error(f"Failed to delete vectors from Qdrant: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to delete vectors from Qdrant") from e
     
     async def count(self, **kwargs: Any) -> int:
         """Get the number of vectors in the store."""
         if self._client is None:
-            return 0
+            raise VectorOperationError("Qdrant client not initialized")
             
         try:
             stats = self._client.get_collection(collection_name=self.collection_name)
             return stats.vectors_count
         except Exception as e:
             self._logger.error(f"Failed to get vector count from Qdrant: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to get vector count from Qdrant") from e
     
     async def reset(self, **kwargs: Any) -> None:
         """Reset the vector store by deleting all vectors."""
         if self._client is None:
-            return
+            raise VectorOperationError("Qdrant client not initialized")
             
         try:
             # Delete the collection and recreate it
@@ -604,7 +606,7 @@ class QdrantVectorStore(BaseVectorStore):
             )
         except Exception as e:
             self._logger.error(f"Failed to reset Qdrant collection: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to reset Qdrant collection") from e
     
     async def close(self, **kwargs: Any) -> None:
         """Close the Qdrant client and release resources."""

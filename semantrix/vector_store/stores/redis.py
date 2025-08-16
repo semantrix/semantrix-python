@@ -27,6 +27,8 @@ except ImportError:
 
 import numpy as np
 
+from semantrix.exceptions import VectorOperationError
+
 from ..base import (
     BaseVectorStore,
     DistanceMetric,
@@ -74,7 +76,7 @@ class RedisVectorStore(BaseVectorStore):
         self._logger = logging.getLogger(__name__)
         
         if not REDIS_AVAILABLE:
-            raise ImportError(
+            raise VectorOperationError(
                 "The 'redis' package is required for RedisVectorStore. "
                 "Please install it with: pip install redis"
             )
@@ -97,7 +99,7 @@ class RedisVectorStore(BaseVectorStore):
             return redis.from_url(self.redis_url, **kwargs)
         except Exception as e:
             self._logger.error(f"Failed to connect to Redis: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to connect to Redis") from e
     
     def _ensure_index(self) -> None:
         """Create the Redis search index if it doesn't exist."""
@@ -136,9 +138,9 @@ class RedisVectorStore(BaseVectorStore):
             
             self._logger.info(f"Created Redis search index: {self.index_name}")
             
-        except Exception as e:
+        except redis.exceptions.RedisError as e:
             self._logger.error(f"Failed to create Redis index: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to create Redis index") from e
     
     def _get_redis_vector_config(self) -> Dict[str, Any]:
         """Get Redis vector configuration."""
@@ -262,9 +264,9 @@ class RedisVectorStore(BaseVectorStore):
             pipe.execute()
             return ids
             
-        except Exception as e:
+        except redis.exceptions.RedisError as e:
             self._logger.error(f"Failed to add vectors to Redis: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to add vectors to Redis") from e
     
     async def get(
         self,
@@ -301,9 +303,9 @@ class RedisVectorStore(BaseVectorStore):
             
             return results
             
-        except Exception as e:
+        except redis.exceptions.RedisError as e:
             self._logger.error(f"Failed to get vectors from Redis: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to get vectors from Redis") from e
     
     def _doc_to_record(self, doc: Any, include_vectors: bool) -> VectorRecord:
         """Convert Redis document to VectorRecord."""
@@ -444,9 +446,9 @@ class RedisVectorStore(BaseVectorStore):
             
             return results
             
-        except Exception as e:
-            self._logger.error(f"Search failed: {str(e)}")
-            raise
+        except redis.exceptions.RedisError as e:
+            self._logger.error(f"Search failed in Redis: {str(e)}")
+            raise VectorOperationError("Search failed in Redis") from e
     
     async def update(
         self,
@@ -505,9 +507,9 @@ class RedisVectorStore(BaseVectorStore):
             # Execute updates
             pipe.execute()
             
-        except Exception as e:
+        except redis.exceptions.RedisError as e:
             self._logger.error(f"Failed to update vectors in Redis: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to update vectors in Redis") from e
     
     async def delete(
         self,
@@ -539,9 +541,9 @@ class RedisVectorStore(BaseVectorStore):
                     keys = [doc.id for doc in results.docs]
                     self._client.delete(*keys)
         
-        except Exception as e:
+        except redis.exceptions.RedisError as e:
             self._logger.error(f"Failed to delete vectors from Redis: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to delete vectors from Redis") from e
     
     async def count(self, **kwargs: Any) -> int:
         """Get the number of vectors in the store."""
@@ -549,9 +551,9 @@ class RedisVectorStore(BaseVectorStore):
             # Use FT.INFO to get document count
             info = self._client.ft(self.index_name).info()
             return int(info.get("num_docs", 0))
-        except Exception as e:
+        except redis.exceptions.RedisError as e:
             self._logger.error(f"Failed to get vector count from Redis: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to get vector count from Redis") from e
     
     async def reset(self, **kwargs: Any) -> None:
         """Reset the vector store by deleting all vectors."""
@@ -562,14 +564,14 @@ class RedisVectorStore(BaseVectorStore):
             # Recreate the index
             self._ensure_index()
             
-        except Exception as e:
+        except redis.exceptions.RedisError as e:
             self._logger.error(f"Failed to reset Redis index: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to reset Redis index") from e
     
     async def close(self, **kwargs: Any) -> None:
         """Close the Redis client connection."""
         try:
             self._client.close()
-        except Exception as e:
+        except redis.exceptions.RedisError as e:
             self._logger.error(f"Error closing Redis client: {str(e)}")
-            raise
+            raise VectorOperationError("Error closing Redis client") from e

@@ -24,6 +24,8 @@ except ImportError:
     IndexHNSWFlat = object
     IndexIDMap = object
 
+from semantrix.exceptions import VectorOperationError
+
 from ..base import (
     BaseVectorStore, DistanceMetric, IndexType, Metadata, MetadataFilter, 
     QueryResult, Vector, VectorRecord
@@ -74,13 +76,13 @@ class FAISSVectorStore(BaseVectorStore):
             ValueError: If persist_on_disk is True but no persist_path is provided
         """
         if not FAISS_AVAILABLE:
-            raise ImportError(
+            raise VectorOperationError(
                 "faiss-cpu is required for FAISSVectorStore. "
                 "Install with: pip install faiss-cpu"
             )
             
         if persist_on_disk and not persist_path:
-            raise ValueError("persist_path must be provided when persist_on_disk is True")
+            raise VectorOperationError("persist_path must be provided when persist_on_disk is True")
             
         super().__init__(dimension=dimension, metric=metric, namespace=namespace)
         
@@ -102,15 +104,15 @@ class FAISSVectorStore(BaseVectorStore):
         if self.persist_path and os.path.exists(f"{self.persist_path}.index"):
             try:
                 self._load_from_disk()
-            except Exception as e:
-                self._logger.warning(f"Failed to load index from {self.persist_path}: {str(e)}")
+            except VectorOperationError as e:
+                self._logger.warning(f"Failed to load index from {self.persist_path}: {e}")
                 self._logger.warning("Starting with an empty index")
                 self._init_index()  # Re-initialize if loading fails
     
     def _init_index(self) -> None:
         """Initialize the FAISS index based on configuration."""
         if not FAISS_AVAILABLE or faiss is None:
-            raise ImportError("FAISS is not available. Please install faiss-cpu or faiss-gpu.")
+            raise VectorOperationError("FAISS is not available. Please install faiss-cpu or faiss-gpu.")
             
         # Map distance metric to FAISS metric
         if self.metric == DistanceMetric.COSINE:
@@ -121,7 +123,7 @@ class FAISSVectorStore(BaseVectorStore):
         elif self.metric == DistanceMetric.MANHATTAN:
             metric = faiss.METRIC_L1
         else:
-            raise ValueError(f"Unsupported distance metric: {self.metric}")
+            raise VectorOperationError(f"Unsupported distance metric: {self.metric}")
         
         # Create appropriate index type - use simpler index without ID mapping
         if self.index_type == IndexType.FLAT:
@@ -138,7 +140,7 @@ class FAISSVectorStore(BaseVectorStore):
             self._index.hnsw.ef_construction = self._index_params.get('ef_construction', 200)
             self._index.hnsw.ef_search = self._index_params.get('ef_search', 50)
         else:
-            raise ValueError(f"Unsupported index type: {self.index_type}")
+            raise VectorOperationError(f"Unsupported index type: {self.index_type}")
         
         # Don't wrap with IndexIDMap - use simple index
         self._is_trained = self.index_type == IndexType.FLAT  # Only Flat index doesn't need training
@@ -147,13 +149,13 @@ class FAISSVectorStore(BaseVectorStore):
         """Convert and normalize a vector."""
         try:
             if vector is None:
-                raise ValueError("Cannot normalize None vector")
-                
+                raise VectorOperationError("Cannot normalize None vector")
+
             if isinstance(vector, (list, tuple)) and not vector:  # Empty list/tuple
-                raise ValueError("Cannot normalize empty vector")
-                
+                raise VectorOperationError("Cannot normalize empty vector")
+
             if isinstance(vector, np.ndarray) and (vector.size == 0 or np.all(np.isnan(vector))):
-                raise ValueError("Cannot normalize empty or NaN vector")
+                raise VectorOperationError("Cannot normalize empty or NaN vector")
                 
             # Convert to numpy array if needed
             if not isinstance(vector, np.ndarray):
@@ -171,11 +173,11 @@ class FAISSVectorStore(BaseVectorStore):
             
             # Check for invalid shapes
             if vector.size == 0 or vector.shape[-1] == 0:
-                raise ValueError(f"Cannot normalize vector with invalid shape: {vector.shape}")
-            
+                raise VectorOperationError(f"Cannot normalize vector with invalid shape: {vector.shape}")
+
             # Verify dimensions match
             if vector.shape[-1] != self.dimension:
-                raise ValueError(
+                raise VectorOperationError(
                     f"Vector dimension {vector.shape[-1]} does not match "
                     f"expected dimension {self.dimension}"
                 )
@@ -189,7 +191,7 @@ class FAISSVectorStore(BaseVectorStore):
         except Exception as e:
             error_msg = f"Error normalizing vector: {str(e)}"
             self._logger.error(f"{error_msg}. Vector type: {type(vector)}, shape: {getattr(vector, 'shape', 'N/A')}")
-            raise ValueError(error_msg) from e
+            raise VectorOperationError(error_msg) from e
     
     def _denormalize_score(self, score: float) -> float:
         """Convert FAISS score to similarity score."""
@@ -285,87 +287,35 @@ class FAISSVectorStore(BaseVectorStore):
                 
         except Exception as e:
             self._logger.error(f"Failed to create/update index: {str(e)}")
-            return False
-    
-    async def list_collections(self) -> List[str]:
-        """
-        List all collections/namespaces in the store.
-        
-        Returns:
-            List of collection/namespace names
-        """
-        # For FAISS, we only support a single collection per instance
-        # The namespace is used as part of the persistence path if provided
-        return [self.namespace or 'default']
-    
-    async def delete_collection(self, name: str, **kwargs: Any) -> bool:
-        """
-        Delete a collection/namespace.
-        
-        Args:
-            name: Name of the collection to delete
-            **kwargs: Additional implementation-specific parameters
-            
-        Returns:
-            True if deletion was successful
-        """
-        try:
-            # Only allow deleting the current namespace/collection
-            if name != (self.namespace or 'default'):
-                self._logger.warning(f"Cannot delete non-existent collection: {name}")
-                return False
-                
-            async with self._lock:
-                # Clear all data
-                self._init_index()
-                self._id_to_record = {}
-                self._string_id_to_int_id = {}  # NEW
-                self._int_id_to_string_id = {}  # NEW
-                self._next_int_id = 0  # NEW
-                
-                # Delete persisted files if they exist
-                if self.persist_path:
-                    try:
-                        if os.path.exists(f"{self.persist_path}.index"):
-                            os.remove(f"{self.persist_path}.index")
-                        if os.path.exists(f"{self.persist_path}.meta"):
-                            os.remove(f"{self.persist_path}.meta")
-                    except Exception as e:
-                        self._logger.error(f"Failed to delete index files: {str(e)}")
-                        return False
-                
-                return True
-                
-        except Exception as e:
-            self._logger.error(f"Failed to delete collection {name}: {str(e)}")
-            return False
-    
+            raise VectorOperationError("Failed to create/update index") from e
+
     def _save_to_disk(self) -> None:
         """
-        Save the index and metadata to disk if persistence is enabled.
+        Save the index and metadata to disk atomically.
         
-        This is a no-op if persist_on_disk is False.
+        This method will:
+        1. Save the index and metadata to temporary files
+        2. Atomically rename them to their final paths
+        3. Handle any errors during the process and clean up temp files
         """
         if not self.persist_path or self._index is None:
             return
             
+        temp_index_path = f"{self.persist_path}.index.tmp"
+        final_index_path = f"{self.persist_path}.index"
+        temp_meta_path = f"{self.persist_path}.meta.tmp"
+        final_meta_path = f"{self.persist_path}.meta"
+        
         try:
-            # Create directory if it doesn't exist
-            dir_path = os.path.dirname(os.path.abspath(self.persist_path))
-            if dir_path:  # Only create if path is not empty
-                os.makedirs(dir_path, exist_ok=True)
-            
             # Save FAISS index
-            temp_index_path = f"{self.persist_path}.index.tmp"
-            final_index_path = f"{self.persist_path}.index"
             faiss.write_index(self._index, temp_index_path)
             
             # Save metadata including ID mappings
             metadata = {
                 'id_to_record': self._id_to_record,
-                'string_id_to_int_id': self._string_id_to_int_id,  # NEW
-                'int_id_to_string_id': self._int_id_to_string_id,  # NEW
-                'next_int_id': self._next_int_id,  # NEW
+                'string_id_to_int_id': self._string_id_to_int_id,
+                'int_id_to_string_id': self._int_id_to_string_id,
+                'next_int_id': self._next_int_id,
                 'dimension': self.dimension,
                 'metric': self.metric.value,
                 'namespace': self.namespace,
@@ -379,15 +329,8 @@ class FAISSVectorStore(BaseVectorStore):
                 pickle.dump(metadata, f)
             
             # Atomic rename to ensure consistency
-            if os.path.exists(final_index_path):
-                os.replace(temp_index_path, final_index_path)
-            else:
-                os.rename(temp_index_path, final_index_path)
-                
-            if os.path.exists(final_meta_path):
-                os.replace(temp_meta_path, final_meta_path)
-            else:
-                os.rename(temp_meta_path, final_meta_path)
+            os.replace(temp_index_path, final_index_path)
+            os.replace(temp_meta_path, final_meta_path)
                 
         except Exception as e:
             self._logger.error(f"Failed to save index to {self.persist_path}: {str(e)}")
@@ -398,7 +341,7 @@ class FAISSVectorStore(BaseVectorStore):
                         os.remove(path)
                 except Exception as cleanup_error:
                     self._logger.warning(f"Failed to clean up temp file {path}: {str(cleanup_error)}")
-            raise
+            raise VectorOperationError("Failed to save index to disk") from e
     
     def _load_from_disk(self) -> None:
         """
@@ -447,11 +390,11 @@ class FAISSVectorStore(BaseVectorStore):
             # Validate metadata
             required_keys = {'dimension', 'metric', 'index_type', 'next_id', 'records'}
             if not all(key in metadata for key in required_keys):
-                raise ValueError(f"Invalid metadata format in {meta_path}")
-            
+                raise VectorOperationError(f"Invalid metadata format in {meta_path}")
+
             # Check dimension compatibility
             if metadata['dimension'] != self.dimension:
-                raise ValueError(
+                raise VectorOperationError(
                     f"Dimension mismatch: stored={metadata['dimension']}, "
                     f"current={self.dimension}"
                 )
@@ -478,7 +421,7 @@ class FAISSVectorStore(BaseVectorStore):
             
             # Reinitialize index
             self._init_index()
-            raise
+            raise VectorOperationError("Failed to load index from disk") from e
     
     async def add(
         self,
@@ -515,11 +458,11 @@ class FAISSVectorStore(BaseVectorStore):
         # Validate inputs
         num_vectors = len(vectors)
         if documents is not None and len(documents) != num_vectors:
-            raise ValueError("Number of documents must match number of vectors")
+            raise VectorOperationError("Number of documents must match number of vectors")
         if metadatas is not None and len(metadatas) != num_vectors:
-            raise ValueError("Number of metadata dicts must match number of vectors")
+            raise VectorOperationError("Number of metadata dicts must match number of vectors")
         if ids is not None and len(ids) != num_vectors:
-            raise ValueError("Number of IDs must match number of vectors")
+            raise VectorOperationError("Number of IDs must match number of vectors")
         
         # Generate string IDs if not provided
         if ids is None:
@@ -548,7 +491,7 @@ class FAISSVectorStore(BaseVectorStore):
         # Add to index and store records
         async with self._lock:
             if self._index is None:
-                raise RuntimeError("FAISS index not initialized")
+                raise VectorOperationError("FAISS index not initialized")
                 
             # Convert to numpy array
             vectors_array = np.vstack(vectors_to_add).astype(np.float32)
@@ -583,7 +526,7 @@ class FAISSVectorStore(BaseVectorStore):
                 self._logger.error(f"Vectors shape: {vectors_array.shape}")
                 self._logger.error(f"Vectors dtype: {vectors_array.dtype}")
                 self._logger.error(f"Index type: {type(self._index).__name__}")
-                raise
+                raise VectorOperationError("Failed to add vectors to FAISS index") from e
             
             # Update records with string IDs
             for record in records:
@@ -703,13 +646,13 @@ class FAISSVectorStore(BaseVectorStore):
             List of vector records matching the query
             
         Raises:
-            ValueError: If neither ids nor filter is provided
+            VectorOperationError: If neither ids nor filter is provided
         """
         if ids is not None and filter is not None:
-            raise ValueError("Cannot specify both ids and filter")
-            
+            raise VectorOperationError("Cannot specify both ids and filter")
+
         if ids is None and filter is None:
-            raise ValueError("Must provide either ids or filter")
+            raise VectorOperationError("Must provide either ids or filter")
             
         # Get by IDs
         if ids is not None:
@@ -771,20 +714,20 @@ class FAISSVectorStore(BaseVectorStore):
         # Validate inputs
         num_updates = len(ids)
         if vectors is not None and len(vectors) != num_updates:
-            raise ValueError("Number of vectors must match number of IDs")
+            raise VectorOperationError("Number of vectors must match number of IDs")
         if documents is not None and len(documents) != num_updates:
-            raise ValueError("Number of documents must match number of IDs")
+            raise VectorOperationError("Number of documents must match number of IDs")
         if metadatas is not None and len(metadatas) != num_updates:
-            raise ValueError("Number of metadata dicts must match number of IDs")
+            raise VectorOperationError("Number of metadata dicts must match number of IDs")
             
         async with self._lock:
             if self._index is None:
-                raise RuntimeError("FAISS index not initialized")
+                raise VectorOperationError("FAISS index not initialized")
                 
             # Process updates
             for i, id in enumerate(ids):
                 if id not in self._id_to_record:
-                    raise ValueError(f"ID not found: {id}")
+                    raise VectorOperationError(f"ID not found: {id}")
                     
                 record = self._id_to_record[id]
                 
@@ -836,10 +779,10 @@ class FAISSVectorStore(BaseVectorStore):
             ValueError: If neither ids nor filter is provided, or if IDs don't exist
         """
         if ids is not None and filter is not None:
-            raise ValueError("Cannot specify both ids and filter")
+            raise VectorOperationError("Cannot specify both ids and filter")
             
         if ids is None and filter is None:
-            raise ValueError("Must provide either ids or filter")
+            raise VectorOperationError("Must provide either ids or filter")
             
         # Convert to list of IDs
         ids_to_delete: List[str] = []
@@ -853,7 +796,7 @@ class FAISSVectorStore(BaseVectorStore):
             # Verify all IDs exist
             for id in ids_to_delete:
                 if id not in self._id_to_record:
-                    raise ValueError(f"ID not found: {id}")
+                    raise VectorOperationError(f"ID not found: {id}")
                     
         elif filter is not None:
             # Get IDs from filter
@@ -866,7 +809,7 @@ class FAISSVectorStore(BaseVectorStore):
         # Perform deletion
         async with self._lock:
             if self._index is None:
-                raise RuntimeError("FAISS index not initialized")
+                raise VectorOperationError("FAISS index not initialized")
                 
             # NEW: Convert string IDs to integer IDs for FAISS deletion
             int_ids_to_delete = []

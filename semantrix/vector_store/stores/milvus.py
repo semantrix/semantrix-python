@@ -27,6 +27,8 @@ except ImportError:
 
 import numpy as np
 
+from semantrix.exceptions import VectorOperationError
+
 from ..base import (
     BaseVectorStore,
     DistanceMetric,
@@ -105,7 +107,7 @@ class MilvusVectorStore(BaseVectorStore):
         elif metric == DistanceMetric.DOT_PRODUCT:
             return MetricType.IP
         else:
-            raise ValueError(f"Unsupported distance metric: {metric}")
+            raise VectorOperationError(f"Unsupported distance metric: {metric}")
     
     def _init_connection(self) -> None:
         """Initialize the Milvus connection."""
@@ -117,9 +119,9 @@ class MilvusVectorStore(BaseVectorStore):
                 **self._connection_args
             )
             self._logger.info(f"Connected to Milvus server at {self.uri}")
-        except Exception as e:
+        except MilvusException as e:
             self._logger.error(f"Failed to connect to Milvus: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to connect to Milvus") from e
     
     def _ensure_collection(self) -> None:
         """Ensure the collection exists and has the correct schema."""
@@ -186,9 +188,9 @@ class MilvusVectorStore(BaseVectorStore):
             
             self._logger.info(f"Created new collection: {self.collection_name}")
             
-        except Exception as e:
+        except MilvusException as e:
             self._logger.error(f"Failed to ensure collection: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to ensure collection") from e
     
     @classmethod
     def from_connection_params(
@@ -251,7 +253,7 @@ class MilvusVectorStore(BaseVectorStore):
     ) -> List[str]:
         """Add vectors to the store."""
         if not self._collection:
-            raise RuntimeError("Collection not initialized")
+            raise VectorOperationError("Collection not initialized")
             
         # Convert inputs to lists for batch processing
         is_single = not isinstance(vectors, list)
@@ -303,9 +305,9 @@ class MilvusVectorStore(BaseVectorStore):
             # Return the generated IDs
             return [str(id_) for id_ in result.primary_keys]
             
-        except Exception as e:
+        except MilvusException as e:
             self._logger.error(f"Failed to add vectors to Milvus: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to add vectors to Milvus") from e
     
     async def get(
         self,
@@ -316,7 +318,7 @@ class MilvusVectorStore(BaseVectorStore):
     ) -> List[VectorRecord]:
         """Get vectors from the store."""
         if not self._collection:
-            raise RuntimeError("Collection not initialized")
+            raise VectorOperationError("Collection not initialized")
             
         # Convert single ID to list
         if ids is not None and not isinstance(ids, list):
@@ -389,9 +391,9 @@ class MilvusVectorStore(BaseVectorStore):
             
             return records
             
-        except Exception as e:
+        except MilvusException as e:
             self._logger.error(f"Failed to get vectors from Milvus: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to get vectors from Milvus") from e
     
     async def search(
         self,
@@ -402,7 +404,7 @@ class MilvusVectorStore(BaseVectorStore):
     ) -> List[QueryResult]:
         """Search for similar vectors."""
         if not self._collection:
-            raise RuntimeError("Collection not initialized")
+            raise VectorOperationError("Collection not initialized")
             
         # Convert query vector to list if it's a numpy array
         query_vec = query_vector.tolist() if hasattr(query_vector, 'tolist') else list(query_vector)
@@ -479,9 +481,9 @@ class MilvusVectorStore(BaseVectorStore):
             
             return query_results
             
-        except Exception as e:
+        except MilvusException as e:
             self._logger.error(f"Failed to search vectors in Milvus: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to search vectors in Milvus") from e
     
     async def update(
         self,
@@ -493,7 +495,7 @@ class MilvusVectorStore(BaseVectorStore):
     ) -> None:
         """Update vectors in the store."""
         if not self._collection:
-            raise RuntimeError("Collection not initialized")
+            raise VectorOperationError("Collection not initialized")
             
         # Convert inputs to lists
         if not isinstance(ids, list):
@@ -549,9 +551,9 @@ class MilvusVectorStore(BaseVectorStore):
                 self._collection.upsert(update_data)
                 self._collection.flush()
                 
-            except Exception as e:
+            except MilvusException as e:
                 self._logger.error(f"Failed to update vectors in Milvus: {str(e)}")
-                raise
+                raise VectorOperationError("Failed to update vectors in Milvus") from e
     
     async def delete(
         self,
@@ -561,7 +563,7 @@ class MilvusVectorStore(BaseVectorStore):
     ) -> None:
         """Delete vectors from the store."""
         if not self._collection:
-            raise RuntimeError("Collection not initialized")
+            raise VectorOperationError("Collection not initialized")
             
         # If neither IDs nor filter provided, delete all vectors
         if ids is None and filter is None:
@@ -576,9 +578,9 @@ class MilvusVectorStore(BaseVectorStore):
                     self._ensure_collection()
                 return
                     
-            except Exception as e:
+            except MilvusException as e:
                 self._logger.error(f"Failed to delete all vectors from Milvus: {str(e)}")
-                raise
+                raise VectorOperationError("Failed to delete all vectors from Milvus") from e
         
         # Build filter expression for targeted delete
         expr_parts = []
@@ -622,14 +624,14 @@ class MilvusVectorStore(BaseVectorStore):
                 self._collection.delete(expr)
                 self._collection.flush()
                     
-            except Exception as e:
+            except MilvusException as e:
                 self._logger.error(f"Failed to delete vectors from Milvus: {str(e)}")
-                raise
+                raise VectorOperationError("Failed to delete vectors from Milvus") from e
     
     async def count(self, **kwargs: Any) -> int:
         """Count the number of vectors in the store."""
         if not self._collection:
-            raise RuntimeError("Collection not initialized")
+            raise VectorOperationError("Collection not initialized")
             
         try:
             # Build filter expression
@@ -651,14 +653,14 @@ class MilvusVectorStore(BaseVectorStore):
                 # Otherwise, use the collection stats
                 return stats.row_count
                 
-        except Exception as e:
+        except MilvusException as e:
             self._logger.error(f"Failed to count vectors in Milvus: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to count vectors in Milvus") from e
     
     async def reset(self, **kwargs: Any) -> None:
         """Reset the vector store by dropping and recreating the collection."""
         if not self._collection:
-            raise RuntimeError("Collection not initialized")
+            raise VectorOperationError("Collection not initialized")
             
         try:
             # Drop the collection
@@ -667,9 +669,9 @@ class MilvusVectorStore(BaseVectorStore):
             # Recreate the collection
             self._ensure_collection()
                 
-        except Exception as e:
+        except MilvusException as e:
             self._logger.error(f"Failed to reset Milvus store: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to reset Milvus store") from e
     
     async def close(self, **kwargs: Any) -> None:
         """Close the Milvus connection."""
@@ -677,6 +679,6 @@ class MilvusVectorStore(BaseVectorStore):
             if self._collection:
                 self._collection.release()
             connections.disconnect("default")
-        except Exception as e:
+        except MilvusException as e:
             self._logger.error(f"Error closing Milvus connection: {str(e)}")
-            raise
+            raise VectorOperationError("Error closing Milvus connection") from e

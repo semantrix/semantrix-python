@@ -15,6 +15,8 @@ try:
 except ImportError:
     PINE_AVAILABLE = False
 
+from semantrix.exceptions import VectorOperationError
+
 from ..base import (
     BaseVectorStore,
     DistanceMetric,
@@ -46,7 +48,7 @@ class PineconeVectorStore(BaseVectorStore):
         self._logger = logging.getLogger(__name__)
         
         if not PINE_AVAILABLE:
-            raise ImportError(
+            raise VectorOperationError(
                 "The 'pinecone-client' package is required for PineconeVectorStore. "
                 "Please install it with: pip install pinecone-client"
             )
@@ -82,7 +84,7 @@ class PineconeVectorStore(BaseVectorStore):
             
         except Exception as e:
             self._logger.error(f"Failed to initialize Pinecone: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to initialize Pinecone") from e
     
     def _get_pinecone_metric(self) -> str:
         """Convert our DistanceMetric to Pinecone's metric string."""
@@ -138,7 +140,7 @@ class PineconeVectorStore(BaseVectorStore):
     ) -> List[str]:
         """Add vectors to the store."""
         if self._index is None:
-            raise RuntimeError("Pinecone index not initialized")
+            raise VectorOperationError("Pinecone index not initialized")
             
         # Convert inputs to lists for batch processing
         is_single = not isinstance(vectors, list)
@@ -184,7 +186,7 @@ class PineconeVectorStore(BaseVectorStore):
             return ids
         except Exception as e:
             self._logger.error(f"Failed to add vectors to Pinecone: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to add vectors to Pinecone") from e
     
     async def get(
         self,
@@ -195,7 +197,7 @@ class PineconeVectorStore(BaseVectorStore):
     ) -> List[VectorRecord]:
         """Get vectors by IDs or filter."""
         if self._index is None:
-            return []
+            raise VectorOperationError("Pinecone index not initialized")
             
         results: List[VectorRecord] = []
         
@@ -222,6 +224,7 @@ class PineconeVectorStore(BaseVectorStore):
                     
             except Exception as e:
                 self._logger.error(f"Failed to fetch vectors from Pinecone: {str(e)}")
+                raise VectorOperationError("Failed to fetch vectors from Pinecone") from e
                 
         elif filter is not None:
             # Fetch by metadata filter
@@ -247,6 +250,7 @@ class PineconeVectorStore(BaseVectorStore):
                     
             except Exception as e:
                 self._logger.error(f"Failed to query Pinecone: {str(e)}")
+                raise VectorOperationError("Failed to query Pinecone by filter") from e
         
         return results
     
@@ -261,7 +265,7 @@ class PineconeVectorStore(BaseVectorStore):
     ) -> List[QueryResult]:
         """Search for similar vectors."""
         if self._index is None:
-            return []
+            raise VectorOperationError("Pinecone index not initialized")
             
         try:
             query_vector_list = query_vector.tolist() if hasattr(query_vector, 'tolist') else list(query_vector)
@@ -291,7 +295,7 @@ class PineconeVectorStore(BaseVectorStore):
             
         except Exception as e:
             self._logger.error(f"Search failed: {str(e)}")
-            raise
+            raise VectorOperationError("Search failed in Pinecone") from e
     
     async def update(
         self,
@@ -303,7 +307,7 @@ class PineconeVectorStore(BaseVectorStore):
     ) -> None:
         """Update vectors in the store."""
         if self._index is None:
-            raise RuntimeError("Pinecone index not initialized")
+            raise VectorOperationError("Pinecone index not initialized")
             
         # Convert inputs to lists
         if isinstance(ids, str):
@@ -363,7 +367,7 @@ class PineconeVectorStore(BaseVectorStore):
                 self._index.upsert(vectors=records_to_update, namespace=self.namespace)
             except Exception as e:
                 self._logger.error(f"Failed to update vectors in Pinecone: {str(e)}")
-                raise
+                raise VectorOperationError("Failed to update vectors in Pinecone") from e
     
     async def delete(
         self,
@@ -373,7 +377,7 @@ class PineconeVectorStore(BaseVectorStore):
     ) -> None:
         """Delete vectors by IDs or filter."""
         if self._index is None:
-            return
+            raise VectorOperationError("Pinecone index not initialized")
             
         try:
             if ids is not None:
@@ -387,12 +391,12 @@ class PineconeVectorStore(BaseVectorStore):
                     self._index.delete(ids=[r.id for r in results], namespace=self.namespace)
         except Exception as e:
             self._logger.error(f"Failed to delete vectors from Pinecone: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to delete vectors from Pinecone") from e
     
     async def count(self, **kwargs: Any) -> int:
         """Get the number of vectors in the store."""
         if self._index is None:
-            return 0
+            raise VectorOperationError("Pinecone index not initialized")
             
         try:
             stats = self._index.describe_index_stats()
@@ -401,19 +405,19 @@ class PineconeVectorStore(BaseVectorStore):
             return 0
         except Exception as e:
             self._logger.error(f"Failed to get vector count from Pinecone: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to get vector count from Pinecone") from e
     
     async def reset(self, **kwargs: Any) -> None:
         """Reset the vector store by deleting all vectors."""
         if self._index is None:
-            return
+            raise VectorOperationError("Pinecone index not initialized")
             
         try:
             # Delete all vectors in the namespace
             self._index.delete(delete_all=True, namespace=self.namespace)
         except Exception as e:
             self._logger.error(f"Failed to reset Pinecone index: {str(e)}")
-            raise
+            raise VectorOperationError("Failed to reset Pinecone index") from e
     
     async def close(self, **kwargs: Any) -> None:
         """Close the Pinecone client and release resources."""
