@@ -13,6 +13,11 @@ from semantrix.utils.profiling import Profiler
 from semantrix.utils.wal import WriteAheadLog, OperationType, create_wal
 from semantrix.utils.retry import retry
 from semantrix.utils.twophase import TwoPhaseCoordinator, Participant, TwoPhaseOperation, TwoPhaseState
+from semantrix.utils.validation import (
+    validate_prompt,
+    validate_response,
+    validate_operation_id,
+)
 from semantrix.models.explain import ExplainResult, CacheMatch, create_explain_result
 from semantrix.exceptions import (
     OperationError,
@@ -487,6 +492,8 @@ class Semantrix:
         Returns:
             Optional[str]: The cached response if found, None otherwise
         """
+        validate_prompt(prompt)
+        validate_operation_id(operation_id)
         # Check if we have an exact match first (fast path)
         if exact_match := await self.cache_store.get(prompt):
             return exact_match
@@ -528,6 +535,9 @@ class Semantrix:
             response: The response to cache
             operation_id: Optional operation ID for idempotency
         """
+        validate_prompt(prompt)
+        validate_response(response)
+        validate_operation_id(operation_id)
         # Generate embedding for the prompt
         embedding = await self.embedder.embed(prompt)
         
