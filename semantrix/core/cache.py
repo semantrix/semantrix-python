@@ -11,6 +11,7 @@ from semantrix.cache_store import BaseCacheStore, InMemoryStore
 from semantrix.utils.resource_limits import ResourceLimits
 from semantrix.utils.profiling import Profiler
 from semantrix.utils.wal import WriteAheadLog, OperationType, create_wal
+from semantrix.utils.retry import retry
 from semantrix.utils.twophase import TwoPhaseCoordinator, Participant, TwoPhaseOperation, TwoPhaseState
 from semantrix.models.explain import ExplainResult, CacheMatch, create_explain_result
 
@@ -388,6 +389,7 @@ class Semantrix:
                 # Re-raise the original exception to maintain the test's expected behavior
                 raise
     
+    @retry(max_retries=3, initial_delay=0.5, backoff_factor=2)
     async def _execute_operation(
         self,
         operation_type: OperationType,
@@ -472,6 +474,7 @@ class Semantrix:
         # If no exact match, try semantic search
         return await self._get_semantic(prompt)
 
+    @retry(max_retries=3, initial_delay=0.5, backoff_factor=2)
     async def _get_semantic(self, prompt: str) -> Optional[str]:
         with self.profiler.record("get"):
             # 1. Check resource constraints
@@ -494,6 +497,7 @@ class Semantrix:
                     
             return None
 
+    @retry(max_retries=3, initial_delay=0.5, backoff_factor=2)
     async def set(self, prompt: str, response: str, operation_id: Optional[str] = None) -> None:
         """
         Add a prompt-response pair to the cache.
