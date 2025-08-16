@@ -10,9 +10,11 @@ from semantrix.vector_store import BaseVectorStore, FAISSVectorStore
 from semantrix.cache_store import BaseCacheStore, InMemoryStore
 from semantrix.utils.resource_limits import ResourceLimits
 from semantrix.utils.profiling import Profiler
-from semantrix.utils.wal import WriteAheadLog, OperationType, create_wal
+from semantrix.utils.wal import OperationType
+from semantrix.utils.twophase.wal_adapter import create_wal_from_config
 from semantrix.utils.retry import retry
-from semantrix.utils.twophase import TwoPhaseCoordinator, Participant, TwoPhaseOperation, TwoPhaseState
+from semantrix.utils.twophase import TwoPhaseCoordinator, TwoPhaseOperation, TwoPhaseState
+from semantrix.utils.twophase.participants import CacheStoreParticipant, VectorStoreParticipant
 from semantrix.utils.validation import (
     validate_prompt,
     validate_response,
@@ -30,176 +32,7 @@ from semantrix.exceptions import (
 # Set up logging
 logger = logging.getLogger(__name__)
 
-class CacheStoreParticipant(Participant):
-    """Participant for cache store operations in 2PC."""
-    
-    def __init__(self, cache_store: BaseCacheStore):
-        self.cache_store = cache_store
-    
-    async def prepare(self, operation: TwoPhaseOperation) -> Tuple[bool, Optional[str]]:
-        try:
-            # For cache store, prepare is a no-op as we can't lock individual keys
-            return True, None
-        except Exception as e:
-            err = CacheOperationError(f"Failed to prepare cache store: {e}", original_exception=e)
-            return False, str(err)
-    
-    async def commit(self, operation: TwoPhaseOperation) -> Tuple[bool, Optional[str]]:
-        try:
-            if operation.operation_type == OperationType.SET:
-                await self.cache_store.add(
-                    operation.data['prompt'],
-                    operation.data['response']
-                )
-            elif operation.operation_type == OperationType.DELETE:
-                await self.cache_store.delete(operation.data['prompt'])
-            return True, None
-        except Exception as e:
-            logger.error(f"Error in CacheStoreParticipant.commit: {e}", exc_info=True)
-            # Wrap in CacheOperationError before returning string representation
-            err = CacheOperationError(f"Failed to commit to cache store: {e}", original_exception=e)
-            return False, str(err)
-    
-    async def rollback(self, operation: TwoPhaseOperation) -> Tuple[bool, Optional[str]]:
-        try:
-            if operation.operation_type == OperationType.SET:
-                # Try to delete the key that was set
-                await self.cache_store.delete(operation.data['prompt'])
-            elif operation.operation_type == OperationType.DELETE:
-                # Can't recover a delete, but we can log it
-                logger.warning("Cannot recover from a failed DELETE operation in cache store")
-            return True, None
-        except Exception as e:
-            logger.error(f"Error during cache store rollback: {e}", exc_info=True)
-            err = CacheOperationError(f"Failed to rollback cache store: {e}", original_exception=e)
-            return False, str(err)
 
-class VectorStoreParticipant(Participant):
-    """Participant for vector store operations in 2PC."""
-    
-    def __init__(self, vector_store: BaseVectorStore):
-        self.vector_store = vector_store
-    
-    async def prepare(self, operation: TwoPhaseOperation) -> Tuple[bool, Optional[str]]:
-        try:
-            # For vector store, prepare is a no-op as we can't lock individual vectors
-            return True, None
-        except Exception as e:
-            err = VectorOperationError(f"Failed to prepare vector store: {e}", original_exception=e)
-            return False, str(err)
-    
-    async def commit(self, operation: TwoPhaseOperation) -> Tuple[bool, Optional[str]]:
-        try:
-            logger.debug(f"[2PC] VectorStoreParticipant.commit - Operation: {operation.operation_type}, "
-                       f"Data keys: {list(operation.data.keys())}")
-            
-            if operation.operation_type == OperationType.SET:
-                # Get the embedding and prompt
-                if 'embedding' not in operation.data:
-                    error_msg = "Missing 'embedding' in operation data"
-                    logger.error(f"[2PC] {error_msg}")
-                    return False, str(ValidationError(error_msg))
-                    
-                if 'prompt' not in operation.data:
-                    error_msg = "Missing 'prompt' in operation data"
-                    logger.error(f"[2PC] {error_msg}")
-                    return False, str(ValidationError(error_msg))
-                
-                embedding = operation.data['embedding']
-                prompt = operation.data['prompt']
-                
-                logger.debug(f"[2PC] VectorStore commit - Operation: {operation.operation_type}, "
-                           f"Prompt: {prompt}, Embedding type: {type(embedding).__name__}, "
-                           f"Embedding length: {len(embedding) if hasattr(embedding, '__len__') else 'N/A'}")
-                
-                # Ensure we have a list of embeddings
-                import numpy as np
-                if isinstance(embedding, (list, np.ndarray)):
-                    if not isinstance(embedding, list) or (isinstance(embedding, list) and len(embedding) > 0 and not isinstance(embedding[0], (list, np.ndarray))):
-                        # Single embedding case
-                        embedding = np.array(embedding, dtype=np.float32)
-                        if embedding.ndim == 1:
-                            embedding = embedding.reshape(1, -1)  # Ensure 2D array
-                        embeddings = [embedding]
-                    else:
-                        # Multiple embeddings case
-                        embeddings = []
-                        for emb in embedding:
-                            emb_array = np.array(emb, dtype=np.float32)
-                            if emb_array.ndim == 1:
-                                emb_array = emb_array.reshape(1, -1)  # Ensure 2D array
-                            embeddings.append(emb_array)
-                else:
-                    # Single scalar embedding
-                    embeddings = [np.array([[embedding]], dtype=np.float32)]
-                
-                if not embeddings:
-                    error_msg = "No embeddings provided in operation data"
-                    logger.error(f"[2PC] {error_msg}")
-                    return False, str(ValidationError(error_msg))
-                
-                logger.debug(f"[2PC] Processed embeddings - Count: {len(embeddings)}, "
-                           f"First embedding type: {type(embeddings[0]).__name__ if embeddings else 'N/A'}, "
-                           f"First embedding length: {len(embeddings[0]) if embeddings and hasattr(embeddings[0], '__len__') else 'N/A'}")
-                
-                # Create a list with the same prompt for each embedding
-                documents = [prompt] * len(embeddings)
-                
-                try:
-                    logger.debug("[2PC] Calling vector_store.add with vectors and documents")
-                    await self.vector_store.add(
-                        vectors=embeddings,
-                        documents=documents,
-                        metadatas=None,
-                        ids=None
-                    )
-                    logger.debug("[2PC] vector_store.add completed successfully")
-                    return True, None
-                except Exception as e:
-                    error_msg = f"Error in vector_store.add: {str(e)}"
-                    logger.error(f"[2PC] {error_msg}", exc_info=True)
-                    err = VectorOperationError(error_msg, original_exception=e)
-                    return False, str(err)
-                    
-            elif operation.operation_type == OperationType.DELETE:
-                # Get the ID to delete from the operation data
-                delete_id = operation.data.get('id') or operation.data.get('prompt')
-                if not delete_id:
-                    error_msg = "No ID provided for delete operation"
-                    logger.error(f"[2PC] {error_msg}")
-                    return False, str(ValidationError(error_msg))
-                
-                try:
-                    logger.debug(f"[2PC] Deleting vector with ID: {delete_id}")
-                    # Delete the vector by ID
-                    await self.vector_store.delete(ids=delete_id)
-                    logger.debug("[2PC] vector_store.delete completed successfully")
-                    return True, None
-                except Exception as e:
-                    error_msg = f"Error in vector_store.delete: {str(e)}"
-                    logger.error(f"[2PC] {error_msg}", exc_info=True)
-                    err = VectorOperationError(error_msg, original_exception=e)
-                    return False, str(err)
-            else:
-                error_msg = f"Unsupported operation type: {operation.operation_type}"
-                logger.error(f"[2PC] {error_msg}")
-                return False, error_msg
-                
-        except Exception as e:
-            error_msg = f"Unexpected error in VectorStoreParticipant.commit: {str(e)}"
-            logger.error(f"[2PC] {error_msg}", exc_info=True)
-            err = VectorOperationError(error_msg, original_exception=e)
-            return False, str(err)
-    
-    async def rollback(self, operation: TwoPhaseOperation) -> Tuple[bool, Optional[str]]:
-        try:
-            # Try to remove the vector if it was added
-            if operation.operation_type == OperationType.SET:
-                await self.vector_store.delete(operation.data['prompt'])
-            return True, None
-        except Exception as e:
-            err = VectorOperationError(f"Failed to rollback vector store: {e}", original_exception=e)
-            return False, str(err)
 
 class Semantrix:
     def __init__(
@@ -258,7 +91,12 @@ class Semantrix:
             
         # Initialize WAL if enabled
         if self.enable_wal and self.wal is None:
-            self.wal = await create_wal(**self.wal_config)
+            # Create WAL configuration
+            wal_config = {
+                'type': 'default',
+                'wal_config': self.wal_config
+            }
+            self.wal = create_wal_from_config(wal_config)
             
             # Initialize 2PC coordinator with WAL
             if self.enable_2pc:
@@ -332,7 +170,7 @@ class Semantrix:
             # Re-execute the operation
             try:
                 logger.info(f"Replaying operation: {operation.operation_id}")
-                success = await operation.execute()
+                success = await self.coordinator.execute_operation(operation)
                 if not success:
                     logger.error(f"Failed to recover operation: {operation.operation_id}")
             except Exception as e:
@@ -375,7 +213,7 @@ class Semantrix:
             logger.debug(f"Created 2PC operation: {operation}")
             
             try:
-                success = await operation.execute()
+                success = await self.coordinator.execute_operation(operation)
                 logger.debug(f"Operation execution completed with success={success}")
                 
                 if not success:
@@ -408,7 +246,7 @@ class Semantrix:
                 logger.error(f"Error during 2PC operation: {e}", exc_info=True)
                 # Ensure operation is aborted on failure
                 if operation.state not in (TwoPhaseState.ABORTED, TwoPhaseState.FAILED):
-                    await operation._abort()
+                    await self.coordinator._abort(operation)
                 # Re-raise the original exception to maintain the test's expected behavior
                 raise
     
