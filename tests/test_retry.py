@@ -9,6 +9,7 @@ from unittest import mock
 import pytest
 
 from semantrix.utils.retry import retry
+from semantrix.exceptions import RetryError
 
 
 class TestRetryDecorator(unittest.IsolatedAsyncioTestCase):
@@ -55,7 +56,7 @@ class TestRetryDecorator(unittest.IsolatedAsyncioTestCase):
             call_count += 1
             raise ValueError("Permanent failure")
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(RetryError):
             await test_func()
 
         self.assertEqual(call_count, max_retries + 1)
@@ -115,10 +116,8 @@ class TestRetryDecorator(unittest.IsolatedAsyncioTestCase):
             # Mock random.uniform to return fixed values for testing
             mock_uniform.side_effect = [1.1, 0.9, 1.15, 0.85, 1.2]
 
-            try:
+            with self.assertRaises(RetryError):
                 await test_func()
-            except ValueError:
-                pass  # Expected
 
             # Check that random.uniform was called with correct parameters
             for call in mock_uniform.call_args_list:
@@ -187,10 +186,8 @@ class TestRetryDecorator(unittest.IsolatedAsyncioTestCase):
                 raise ValueError("Temporary failure")
 
         with mock.patch("asyncio.sleep") as mock_sleep:
-            try:
+            with self.assertRaises(RetryError):
                 await test_func()
-            except ValueError:
-                pass  # Expected
 
             # Check sleep was called with delays not exceeding max_delay
             self.assertEqual(mock_sleep.call_count, 3)

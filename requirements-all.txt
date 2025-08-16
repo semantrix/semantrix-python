@@ -23,6 +23,17 @@ pinecone-client>=2.2.0
 qdrant-client>=1.1.0
 pymilvus>=2.2.0
 
+# OpenTelemetry dependencies
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+opentelemetry-instrumentation>=0.40b0
+opentelemetry-exporter-otlp>=1.20.0
+opentelemetry-exporter-jaeger>=1.20.0
+opentelemetry-exporter-zipkin>=1.20.0
+opentelemetry-instrumentation-logging>=0.40b0
+opentelemetry-instrumentation-requests>=0.40b0
+opentelemetry-instrumentation-aiohttp>=0.40b0
+
 # Dev dependencies
 pytest>=7.0.0
 pytest-asyncio>=0.20.0
