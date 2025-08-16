@@ -8,6 +8,8 @@ import os
 import logging
 import uuid
 from typing import Any, ClassVar, Dict, List, Optional, Union, cast, overload
+import asyncio
+import numpy as np
 
 from chromadb import Client, Collection
 from chromadb.config import Settings as ChromaSettings
@@ -60,39 +62,16 @@ class ChromaVectorStore(BaseVectorStore):
         metric: DistanceMetric = DistanceMetric.COSINE,
         **kwargs: Any
     ) -> 'ChromaVectorStore':
-        """Create a ChromaVectorStore connected to a remote Chroma server.
-        
-        Args:
-            dimension: The dimension of the vectors to be stored
-            host: Chroma server hostname or IP address
-            port: Chroma server port (default: 8000)
-            ssl: Whether to use HTTPS (default: False)
-            api_key: Optional API key for authentication
-            namespace: Optional namespace for multi-tenancy
-            metric: Distance metric to use for similarity search
-            **kwargs: Additional Chroma client settings
-            
-        Returns:
-            ChromaVectorStore instance connected to the specified server
-            
-        Example:
-            ```python
-            # Connect to a Chroma server
-            store = ChromaVectorStore.from_server(
-                dimension=768,
-                host="chroma-server.example.com",
-                port=8000,
-                ssl=True,
-                api_key="your-api-key"
-            )
-            ```
-        """
+        """Create a ChromaVectorStore connected to a remote Chroma server."""
         settings: Dict[str, Any] = {
             'chroma_api_impl': 'rest',
             'chroma_server_host': host,
             'chroma_server_http_port': port,
-            'chroma_server_ssl': ssl
         }
+        
+        # Only add SSL setting if it's True
+        if ssl:
+            settings['chroma_server_ssl_enabled'] = True
         
         if api_key:
             settings['chroma_server_auth_credentials'] = api_key
@@ -104,16 +83,11 @@ class ChromaVectorStore(BaseVectorStore):
             dimension=dimension,
             metric=metric,
             namespace=namespace,
-            in_memory=False,  # Ignored when using server mode
-            persist_directory=None,  # Ignored when using server mode
-            chroma_settings=settings
+            **settings
         )
     
     def _init_chroma_client(self, **kwargs: Any) -> Client:
-        """Initialize the Chroma client with appropriate settings.
-        
-        This handles both local (in-memory/persistent) and server connection modes.
-        """
+        """Initialize the Chroma client with appropriate settings."""
         # If chroma_settings is provided, use it directly (for server connections)
         if 'chroma_settings' in kwargs:
             return Client(settings=ChromaSettings(**kwargs['chroma_settings']))
@@ -169,38 +143,91 @@ class ChromaVectorStore(BaseVectorStore):
         ids: Optional[Union[str, List[str]]] = None,
         **kwargs: Any
     ) -> List[str]:
-        if self._collection is None:
-            raise RuntimeError("Chroma collection not initialized")
-            
-        is_single = not isinstance(vectors, list)
-        if is_single:
-            vectors = [cast(Vector, vectors)]
-            documents = [documents] if documents is not None else None
-            metadatas = [metadatas] if metadatas is not None else None
-            ids = [ids] if ids is not None else None
+        """Add vectors to the store."""
+        # Debug logging
+        self._logger.debug(f"Input vectors type: {type(vectors)}, length: {len(vectors) if hasattr(vectors, '__len__') else 'N/A'}")
         
+        # Ensure vectors is a list
+        if not isinstance(vectors, list):
+            vectors = [vectors]
+        
+        # Ensure documents is a list
+        if documents is not None and not isinstance(documents, list):
+            documents = [documents]
+        
+        # Ensure metadatas is a list
+        if metadatas is not None and not isinstance(metadatas, list):
+            metadatas = [metadatas]
+        
+        # Generate IDs if not provided
         if ids is None:
             ids = [str(uuid.uuid4()) for _ in range(len(vectors))]
+        elif not isinstance(ids, list):
+            ids = [ids]
         
-        if documents is None:
-            documents = ["" for _ in range(len(vectors))]
+        # Ensure all lists have the same length
+        max_len = len(vectors)
+        if documents is not None:
+            documents = documents + [None] * (max_len - len(documents))
+        if metadatas is not None:
+            metadatas = metadatas + [{}] * (max_len - len(metadatas))
         
+        # Convert vectors to numpy arrays
+        vectors_array = [np.array(v, dtype=np.float32) for v in vectors]
+        
+        # Prepare metadata with placeholder if needed
         if metadatas is None:
-            metadatas = [{} for _ in range(len(vectors))]
+            metadatas = [{"_placeholder": "true"} for _ in range(max_len)]
+        else:
+            for i, meta in enumerate(metadatas):
+                if meta is None:
+                    metadatas[i] = {"_placeholder": "true"}
+                elif not meta:  # Empty dict
+                    metadatas[i] = {"_placeholder": "true"}
         
-        if self.namespace:
-            for meta in metadatas:
-                if meta is not None:
-                    meta["namespace"] = self.namespace
+        # Prepare documents - use empty string if None
+        if documents is None:
+            documents = ["" for _ in range(max_len)]
+        else:
+            documents = [doc if doc is not None else "" for doc in documents]
         
-        self._collection.add(
-            embeddings=vectors,
-            documents=documents,
-            metadatas=metadatas,
-            ids=ids
-        )
+        def _add_chroma():
+            self._collection.add(
+                embeddings=vectors_array,
+                documents=documents,  # Pass documents directly
+                metadatas=metadatas,
+                ids=ids
+            )
+        
+        await asyncio.get_event_loop().run_in_executor(None, _add_chroma)
         
         return ids
+
+    def _convert_filter(self, filter: MetadataFilter) -> Dict[str, Any]:
+        """Convert metadata filter to ChromaDB format."""
+        if not filter:
+            return {}
+        
+        chroma_filter = {}
+        for key, value in filter.items():
+            # Handle numpy arrays and other array-like objects
+            if hasattr(value, '__len__') and not isinstance(value, (str, bytes)):
+                # Convert arrays to lists to avoid numpy boolean evaluation issues
+                if hasattr(value, 'tolist'):
+                    value = value.tolist()
+                elif hasattr(value, '__iter__'):
+                    value = list(value)
+            
+            chroma_filter[key] = {"$eq": value}
+        
+        return chroma_filter
+    
+    def _safe_boolean_check(self, value) -> bool:
+        """Safely check if a value is truthy, handling numpy arrays."""
+        if hasattr(value, '__len__') and not isinstance(value, (str, bytes)):
+            # For arrays, check if they have any elements
+            return len(value) > 0
+        return bool(value)
 
     async def get(
         self,
@@ -212,51 +239,78 @@ class ChromaVectorStore(BaseVectorStore):
         if self._collection is None:
             return []
             
-        results: List[VectorRecord] = []
-        
-        if ids is not None:
-            if isinstance(ids, str):
-                ids = [ids]
-                
-            records = self._collection.get(
-                ids=ids,
-                include=["embeddings", "metadatas", "documents"] if include_vectors 
-                       else ["metadatas", "documents"]
-            )
+        def _get_from_chroma():
+            results: List[VectorRecord] = []
             
-            for i, id in enumerate(ids):
-                if id in records["ids"]:
-                    idx = records["ids"].index(id)
+            if ids is not None:
+                if isinstance(ids, str):
+                    ids_list = [ids]
+                else:
+                    ids_list = ids
+                    
+                # Always include documents in the query
+                records = self._collection.get(
+                    ids=ids_list,
+                    include=["embeddings", "metadatas", "documents"] if include_vectors 
+                       else ["metadatas", "documents"]
+                )
+                
+                self._logger.debug(f"Retrieved records: {records}")
+                
+                for i, id in enumerate(ids_list):
+                    if id in records["ids"] and self._safe_boolean_check(records["ids"]):
+                        idx = records["ids"].index(id)
+                        embedding = None
+                        if include_vectors and self._safe_boolean_check(records["embeddings"]):
+                            embedding = records["embeddings"][idx]
+                        
+                        # Get document from the documents field
+                        document = None
+                        if "documents" in records and self._safe_boolean_check(records["documents"]):
+                            document = records["documents"][idx]
+                            # Convert empty string back to None for consistency
+                            if document == "":
+                                document = None
+                        
+                        results.append(VectorRecord(
+                            id=id,
+                            embedding=embedding,
+                            document=document,
+                            metadata=records["metadatas"][idx] if self._safe_boolean_check(records["metadatas"]) else {},
+                            namespace=self.namespace
+                        ))
+            elif filter is not None:
+                chroma_filter = self._convert_filter(filter)
+                records = self._collection.get(
+                    where=chroma_filter,
+                    include=["embeddings", "metadatas", "documents"] if include_vectors 
+                       else ["metadatas", "documents"]
+                )
+                
+                for i, id in enumerate(records["ids"]):
+                    embedding = None
+                    if include_vectors and self._safe_boolean_check(records["embeddings"]):
+                        embedding = records["embeddings"][i]
+                    
+                    # Get document from the documents field
+                    document = None
+                    if "documents" in records and self._safe_boolean_check(records["documents"]):
+                        document = records["documents"][i]
+                        # Convert empty string back to None for consistency
+                        if document == "":
+                            document = None
+                    
                     results.append(VectorRecord(
                         id=id,
-                        embedding=records["embeddings"][idx] if include_vectors and records["embeddings"] else None,
-                        document=records["documents"][idx] if records["documents"] else None,
-                        metadata=records["metadatas"][idx] if records["metadatas"] else {},
+                        embedding=embedding,
+                        document=document,
+                        metadata=records["metadatas"][i] if self._safe_boolean_check(records["metadatas"]) else {},
                         namespace=self.namespace
                     ))
-        elif filter is not None:
-            chroma_filter = self._convert_filter(filter)
-            records = self._collection.get(
-                where=chroma_filter,
-                include=["embeddings", "metadatas", "documents"] if include_vectors 
-                       else ["metadatas", "documents"]
-            )
             
-            for i, id in enumerate(records["ids"]):
-                results.append(VectorRecord(
-                    id=id,
-                    embedding=records["embeddings"][i] if include_vectors and records["embeddings"] else None,
-                    document=records["documents"][i] if records["documents"] else None,
-                    metadata=records["metadatas"][i] if records["metadatas"] else {},
-                    namespace=self.namespace
-                ))
+            return results
         
-        return results
-    
-    def _convert_filter(self, filter: MetadataFilter) -> Dict[str, Any]:
-        if not filter:
-            return {}
-        return {key: {"$eq": value} for key, value in filter.items()}
+        return await asyncio.get_event_loop().run_in_executor(None, _get_from_chroma)
     
     async def search(
         self,
@@ -267,108 +321,111 @@ class ChromaVectorStore(BaseVectorStore):
         include_metadata: bool = True,
         **kwargs: Any
     ) -> List[QueryResult]:
-        if self._collection is None:
-            return []
-            
-        chroma_filter = self._convert_filter(filter) if filter else None
-        
-        results = self._collection.query(
-            query_embeddings=[query_vector],
-            n_results=k,
-            where=chroma_filter,
-            include=["embeddings", "metadatas", "documents", "distances"]
-        )
-        
-        query_results: List[QueryResult] = []
-        
-        if results and "ids" in results and results["ids"]:
-            for i, id in enumerate(results["ids"][0]):
-                if not id:
-                    continue
-                    
-                distance = results["distances"][0][i] if results.get("distances") else None
-                score = 1.0 / (1.0 + distance) if distance is not None else 1.0
+        """Search for similar vectors."""
+        def _search_chroma():
+            try:
+                # Convert filter to ChromaDB format if provided
+                where = None
+                if filter:
+                    where = self._convert_filter(filter)
                 
-                metadata = results["metadatas"][0][i] if results.get("metadatas") else {}
-                document = results["documents"][0][i] if results.get("documents") else None
+                # Perform search
+                results = self._collection.query(
+                    query_embeddings=[query_vector],
+                    n_results=k,
+                    where=where,
+                    include=["metadatas", "documents", "distances"],
+                    **kwargs
+                )
                 
-                result: QueryResult = {
-                    "id": id,
-                    "document": document,
-                    "metadata": metadata if include_metadata else None,
-                    "score": float(score),
-                    "vector": results["embeddings"][0][i] if include_vectors and results.get("embeddings") else None
-                }
+                # Convert results to QueryResult format
+                query_results = []
+                if self._safe_boolean_check(results["ids"]) and len(results["ids"]) > 0:
+                    for i, (id_val, distance, metadata, document) in enumerate(zip(
+                        results["ids"][0],
+                        results["distances"][0],
+                        results["metadatas"][0],
+                        results["documents"][0]
+                    )):
+                        query_results.append(QueryResult(
+                            id=id_val,
+                            score=1.0 - distance,  # Convert distance to similarity score
+                            metadata=metadata,
+                            document=document
+                        ))
                 
-                query_results.append(result)
+                return query_results
+            except Exception as e:
+                self._logger.error(f"Error searching ChromaDB: {e}")
+                raise
         
-        return query_results
+        return await asyncio.get_event_loop().run_in_executor(None, _search_chroma)
     
     async def update(
         self,
         ids: Union[str, List[str]],
         vectors: Optional[Union[Vector, List[Vector]]] = None,
-        documents: Optional[Union[str, List[str], None]] = None,
-        metadatas: Optional[Union[Metadata, List[Metadata], None]] = None,
+        documents: Optional[Union[str, List[str]]] = None,
+        metadatas: Optional[Union[Metadata, List[Metadata]]] = None,
         **kwargs: Any
-    ) -> None:
-        if self._collection is None:
-            raise RuntimeError("Chroma collection not initialized")
-            
-        if isinstance(ids, str):
+    ) -> bool:
+        """Update vectors in the store."""
+        if not self._collection:
+            raise RuntimeError("Collection not initialized")
+        
+        # Ensure ids is a list
+        if not isinstance(ids, list):
             ids = [ids]
-            
+        
+        # Ensure vectors is a list
         if vectors is not None and not isinstance(vectors, list):
             vectors = [vectors]
-            
+        
+        # Ensure documents is a list
         if documents is not None and not isinstance(documents, list):
             documents = [documents]
-            
+        
+        # Ensure metadatas is a list
         if metadatas is not None and not isinstance(metadatas, list):
             metadatas = [metadatas]
         
-        existing = await self.get(ids=ids, include_vectors=True)
-        existing_map = {r.id: r for r in existing}
+        # Ensure all lists have the same length
+        max_len = len(ids)
+        if vectors is not None:
+            vectors = vectors + [None] * (max_len - len(vectors))
+        if documents is not None:
+            documents = documents + [None] * (max_len - len(documents))
+        if metadatas is not None:
+            metadatas = metadatas + [{}] * (max_len - len(metadatas))
         
-        update_vectors = []
-        update_documents = []
-        update_metadatas = []
-        update_ids = []
+        # Convert vectors to numpy arrays
+        if vectors is not None:
+            vectors_array = [np.array(v, dtype=np.float32) if v is not None else None for v in vectors]
+        else:
+            vectors_array = None
         
-        for i, id in enumerate(ids):
-            if id not in existing_map:
-                self._logger.warning(f"ID not found, skipping update: {id}")
-                continue
-                
-            record = existing_map[id]
-            
-            if vectors is not None and i < len(vectors):
-                record.embedding = vectors[i]
-            
-            if documents is not None and i < len(documents):
-                record.document = documents[i]
-            
-            if metadatas is not None and i < len(metadatas):
-                if metadatas[i] is None:
-                    record.metadata = {}
-                else:
-                    if record.metadata is None:
-                        record.metadata = {}
-                    record.metadata.update(metadatas[i])
-            
-            update_vectors.append(record.embedding)
-            update_documents.append(record.document or "")
-            update_metadatas.append(record.metadata or {})
-            update_ids.append(id)
+        # Prepare metadata with placeholder if needed
+        if metadatas is not None:
+            for i, meta in enumerate(metadatas):
+                if meta is None:
+                    metadatas[i] = {"_placeholder": "true"}
+                elif not meta:  # Empty dict
+                    metadatas[i] = {"_placeholder": "true"}
         
-        if update_ids:
-            self._collection.delete(ids=update_ids)
-            self._collection.add(
-                embeddings=update_vectors,
-                documents=update_documents,
-                metadatas=update_metadatas,
-                ids=update_ids
+        # Prepare documents - use empty string if None
+        if documents is not None:
+            documents = [doc if doc is not None else "" for doc in documents]
+        
+        def _update_chroma():
+            self._collection.update(
+                ids=ids,
+                embeddings=vectors_array,
+                documents=documents,
+                metadatas=metadatas
             )
+        
+        await asyncio.get_event_loop().run_in_executor(None, _update_chroma)
+        return True
     
     async def delete(
         self,
@@ -376,37 +433,114 @@ class ChromaVectorStore(BaseVectorStore):
         filter: Optional[MetadataFilter] = None,
         **kwargs: Any
     ) -> None:
-        if self._collection is None:
-            return
-            
-        if ids is not None:
-            if isinstance(ids, str):
-                ids = [ids]
-            self._collection.delete(ids=ids)
-        elif filter is not None:
-            chroma_filter = self._convert_filter(filter)
-            results = self._collection.get(
-                where=chroma_filter,
-                include=[],
-                limit=10000
-            )
-            if results and results["ids"]:
-                self._collection.delete(ids=results["ids"])
+        def _delete_from_chroma():
+            if self._collection is None:
+                return
+                
+            if ids is not None:
+                if isinstance(ids, str):
+                    ids_list = [ids]
+                else:
+                    ids_list = ids
+                self._collection.delete(ids=ids_list)
+            elif filter is not None:
+                chroma_filter = self._convert_filter(filter)
+                results = self._collection.get(
+                    where=chroma_filter,
+                    include=[],
+                    limit=10000
+                )
+                    # Fix the array truth value issue with explicit checks
+                if (results is not None and 
+                    isinstance(results, dict) and
+                    "ids" in results and 
+                    results["ids"] is not None and 
+                    isinstance(results["ids"], list) and
+                    len(results["ids"]) > 0):
+                    self._collection.delete(ids=results["ids"])
+        
+        await asyncio.get_event_loop().run_in_executor(None, _delete_from_chroma)
+    
+    async def create_index(
+        self,
+        index_type: IndexType = IndexType.FLAT,
+        metric: Optional[DistanceMetric] = None,
+        **kwargs: Any
+    ) -> bool:
+        """Create or update the vector index."""
+        def _create_index():
+            try:
+                # ChromaDB creates indexes automatically, so we just ensure the collection exists
+                if self._collection is None:
+                    self._init_collection()
+                return True
+            except Exception as e:
+                self._logger.error(f"Error creating index: {e}")
+                return False
+        
+        return await asyncio.get_event_loop().run_in_executor(None, _create_index)
+    
+    async def get_index_info(self) -> Dict[str, Any]:
+        """Get information about the current index."""
+        def _get_index_info():
+            try:
+                if self._collection is None:
+                    return {"error": "No collection initialized"}
+                
+                # Get collection info
+                collection_info = self._collection.get()
+                return {
+                    "collection_name": self._collection.name,
+                    "count": len(collection_info.get("ids", [])),
+                    "metadata": collection_info.get("metadatas", []),
+                    "dimension": self.dimension,
+                    "metric": self._chroma_metric
+                }
+            except Exception as e:
+                self._logger.error(f"Error getting index info: {e}")
+                return {"error": str(e)}
+        
+        return await asyncio.get_event_loop().run_in_executor(None, _get_index_info)
+    
+    async def list_collections(self) -> List[str]:
+        """List all collections in the store."""
+        def _list_collections():
+            try:
+                collections = self._client.list_collections()
+                return [col.name for col in collections]
+            except Exception as e:
+                self._logger.error(f"Error listing collections: {e}")
+                return []
+        
+        return await asyncio.get_event_loop().run_in_executor(None, _list_collections)
+    
+    async def delete_collection(self, name: str, **kwargs: Any) -> bool:
+        """Delete a collection."""
+        def _delete_collection():
+            try:
+                self._client.delete_collection(name=name)
+                return True
+            except Exception as e:
+                self._logger.error(f"Error deleting collection {name}: {e}")
+                return False
+        
+        return await asyncio.get_event_loop().run_in_executor(None, _delete_collection)
     
     async def count(self, filter: Optional[MetadataFilter] = None) -> int:
-        if self._collection is None:
-            return 0
+        """Count the number of vectors matching the filter."""
+        def _count():
+            try:
+                if self._collection is None:
+                    return 0
             
-        if filter is None:
-            return self._collection.count()
-        else:
-            chroma_filter = self._convert_filter(filter)
-            results = self._collection.get(
-                where=chroma_filter,
-                include=[],
-                limit=100000
-            )
-            return len(results["ids"]) if results and "ids" in results else 0
+                # Get all documents and count them
+                result = self._collection.get()
+                return len(result.get("ids", []))
+            except Exception as e:
+                self._logger.error(f"Error counting vectors: {e}")
+            return 0
+        
+        return await asyncio.get_event_loop().run_in_executor(None, _count)
     
     async def reset(self) -> None:
         if self._collection is not None:
@@ -418,73 +552,3 @@ class ChromaVectorStore(BaseVectorStore):
             self._client.heartbeat()  # Ensure any pending writes are flushed
             self._client = None
         self._collection = None
-
-    async def create_index(
-        self,
-        index_type: IndexType = IndexType.FLAT,
-        metric: Optional[DistanceMetric] = None,
-        **kwargs: Any
-    ) -> bool:
-        """
-        Create or update the vector index.
-        
-        Note: ChromaDB handles index creation automatically, so this is a no-op.
-        """
-        try:
-            # ChromaDB creates indexes automatically, so we just ensure the collection exists
-            if self._collection is None:
-                self._init_collection()
-            return True
-        except Exception as e:
-            self._logger.error(f"Error creating index: {e}")
-            return False
-    
-    async def get_index_info(self) -> Dict[str, Any]:
-        """Get information about the current index."""
-        try:
-            if self._collection is None:
-                return {"error": "No collection initialized"}
-            
-            # Get collection info
-            collection_info = self._collection.get()
-            return {
-                "collection_name": self._collection.name,
-                "count": len(collection_info.get("ids", [])),
-                "metadata": collection_info.get("metadatas", []),
-                "dimension": self.dimension,
-                "metric": self._chroma_metric
-            }
-        except Exception as e:
-            self._logger.error(f"Error getting index info: {e}")
-            return {"error": str(e)}
-    
-    async def list_collections(self) -> List[str]:
-        """List all collections in the store."""
-        try:
-            collections = self._client.list_collections()
-            return [col.name for col in collections]
-        except Exception as e:
-            self._logger.error(f"Error listing collections: {e}")
-            return []
-    
-    async def delete_collection(self, name: str, **kwargs: Any) -> bool:
-        """Delete a collection."""
-        try:
-            self._client.delete_collection(name=name)
-            return True
-        except Exception as e:
-            self._logger.error(f"Error deleting collection {name}: {e}")
-            return False
-    
-    async def count(self, filter: Optional[MetadataFilter] = None) -> int:
-        """Count the number of vectors matching the filter."""
-        try:
-            if self._collection is None:
-                return 0
-            
-            # Get all documents and count them
-            result = self._collection.get()
-            return len(result.get("ids", []))
-        except Exception as e:
-            self._logger.error(f"Error counting vectors: {e}")
-            return 0
