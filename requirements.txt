@@ -4,6 +4,7 @@ faiss-cpu
 psutil
 attrs
 tenacity>=8.2.3
+typing_extensions
 
 # For development/testing
 # pytest
