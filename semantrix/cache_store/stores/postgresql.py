@@ -15,6 +15,7 @@ from asyncpg import Connection, Pool, create_pool
 from asyncpg.pool import PoolAcquireContext
 
 from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy
+from semantrix.exceptions import CacheOperationError
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -69,10 +70,11 @@ class PostgreSQLCacheStore(BaseCacheStore):
                 async with self._pool.acquire() as conn:
                     await conn.execute("SELECT 1")
                 return
-            except Exception:
+            except asyncpg.PostgresError as e:
                 self._connected = False
                 if self._pool:
                     await self._pool.close()
+                raise CacheOperationError("Failed to verify PostgreSQL connection", original_exception=e) from e
         
         async with self._lock:
             if not self._connected:
@@ -93,10 +95,10 @@ class PostgreSQLCacheStore(BaseCacheStore):
                     self._connected = True
                     logger.info(f"Connected to PostgreSQL at {self.dsn}")
                     
-                except Exception as e:
+                except asyncpg.PostgresError as e:
                     self._connected = False
                     logger.error(f"Failed to connect to PostgreSQL: {e}")
-                    raise
+                    raise CacheOperationError("Failed to connect to PostgreSQL", original_exception=e) from e
 
     async def _initialize_schema(self) -> None:
         """Initialize database tables and indexes."""
@@ -160,7 +162,7 @@ class PostgreSQLCacheStore(BaseCacheStore):
                     END IF;
                 END $$;
             """)
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             logger.warning(f"Schema migration failed: {e}")
 
     async def get_exact(self, prompt: str) -> Optional[str]:
@@ -188,16 +190,16 @@ class PostgreSQLCacheStore(BaseCacheStore):
                 
                 return row['value'] if row else None
                 
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             logger.error(f"Error getting item from PostgreSQL cache: {e}")
-            return None
+            raise CacheOperationError(f"Failed to get item from PostgreSQL for key: {prompt}", original_exception=e) from e
 
     async def add(self, prompt: str, response: str, ttl: Optional[float] = None) -> None:
         """Add a response to the cache."""
         try:
             await self._ensure_connected()
             if not self._pool:
-                raise RuntimeError("PostgreSQL connection pool not available")
+                raise CacheOperationError("PostgreSQL connection pool not available")
                 
             expires_at = (
                 f"(NOW() AT TIME ZONE 'UTC' + INTERVAL '{ttl} seconds')" 
@@ -226,9 +228,9 @@ class PostgreSQLCacheStore(BaseCacheStore):
                     prompt, response
                 )
                 
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             logger.error(f"Error adding item to PostgreSQL cache: {e}")
-            raise
+            raise CacheOperationError(f"Failed to add item to PostgreSQL for key: {prompt}", original_exception=e) from e
             
     async def delete(self, key: str) -> bool:
         """
@@ -258,9 +260,9 @@ class PostgreSQLCacheStore(BaseCacheStore):
                 # If rows were affected, the key existed and was deleted
                 return result.split()[-1] == '1'  # Returns 'DELETE 1' if successful
                 
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             logger.error(f"Error deleting key from PostgreSQL cache: {e}")
-            return False
+            raise CacheOperationError(f"Failed to delete key from PostgreSQL: {key}", original_exception=e) from e
 
     async def clear(self) -> None:
         """Clear all items from the cache."""
@@ -269,9 +271,9 @@ class PostgreSQLCacheStore(BaseCacheStore):
             if self._pool:
                 async with self._pool.acquire() as conn:
                     await conn.execute(f"TRUNCATE TABLE {self.table_name}")
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             logger.error(f"Error clearing PostgreSQL cache: {e}")
-            raise
+            raise CacheOperationError("Failed to clear PostgreSQL cache", original_exception=e) from e
 
     async def size(self) -> int:
         """Get the number of items in the cache."""
@@ -290,9 +292,9 @@ class PostgreSQLCacheStore(BaseCacheStore):
                 )
                 return row['count'] if row else 0
                 
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             logger.error(f"Error getting PostgreSQL cache size: {e}")
-            return 0
+            raise CacheOperationError("Failed to get PostgreSQL cache size", original_exception=e) from e
 
     async def enforce_limits(self, resource_limits: Any) -> None:
         """Enforce cache size limits."""
@@ -318,9 +320,9 @@ class PostgreSQLCacheStore(BaseCacheStore):
                 if max_size is not None and current_size > max_size:
                     await self.eviction_policy.apply(self, max_size)
                     
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             logger.error(f"Error enforcing PostgreSQL cache limits: {e}")
-            raise
+            raise CacheOperationError("Failed to enforce PostgreSQL cache limits", original_exception=e) from e
 
     def get_eviction_policy(self) -> EvictionPolicy:
         """Get the eviction policy for this cache store."""
@@ -333,9 +335,9 @@ class PostgreSQLCacheStore(BaseCacheStore):
                 await self._pool.close()
                 self._connected = False
                 logger.info("Closed PostgreSQL connection pool")
-            except Exception as e:
+            except asyncpg.PostgresError as e:
                 logger.error(f"Error closing PostgreSQL connection pool: {e}")
-                raise
+                raise CacheOperationError("Failed to close PostgreSQL connection pool", original_exception=e) from e
 
     async def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
@@ -373,9 +375,9 @@ class PostgreSQLCacheStore(BaseCacheStore):
                 
                 return stats
                 
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             logger.error(f"Error getting PostgreSQL cache stats: {e}")
-            return {"error": str(e)}
+            raise CacheOperationError("Failed to get PostgreSQL stats", original_exception=e) from e
 
     def __del__(self) -> None:
         """Ensure connection pool is closed when the object is garbage collected."""

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, cast
 
 from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy
+from semantrix.exceptions import CacheOperationError
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -114,7 +115,7 @@ class SQLiteCacheStore(BaseCacheStore):
     async def get_exact(self, prompt: str) -> Optional[str]:
         """Get a cached response if it exists and is not expired."""
         if self._closed:
-            raise RuntimeError("SQLiteCacheStore is closed")
+            raise CacheOperationError("Cache store is closed")
             
         conn = await self._get_connection()
         try:
@@ -144,15 +145,14 @@ class SQLiteCacheStore(BaseCacheStore):
                 return row[0]
             return None
         except sqlite3.Error as e:
-            logger.error(f"Error getting item from SQLite cache: {e}")
-            return None
+            raise CacheOperationError("Failed to get item from SQLite cache", original_exception=e) from e
         finally:
             self._return_connection(conn)
 
     async def add(self, prompt: str, response: str, ttl: Optional[float] = None) -> None:
         """Add a response to the cache."""
         if self._closed:
-            raise RuntimeError("SQLiteCacheStore is closed")
+            raise CacheOperationError("Cache store is closed")
             
         conn = await self._get_connection()
         try:
@@ -170,8 +170,7 @@ class SQLiteCacheStore(BaseCacheStore):
             )
             conn.commit()
         except sqlite3.Error as e:
-            logger.error(f"Error adding item to SQLite cache: {e}")
-            raise
+            raise CacheOperationError("Failed to add item to SQLite cache", original_exception=e) from e
         finally:
             self._return_connection(conn)
             
@@ -186,7 +185,7 @@ class SQLiteCacheStore(BaseCacheStore):
             bool: True if the key was found and deleted, False otherwise
         """
         if self._closed:
-            raise RuntimeError("SQLiteCacheStore is closed")
+            raise CacheOperationError("Cache store is closed")
             
         conn = await self._get_connection()
         try:
@@ -211,15 +210,14 @@ class SQLiteCacheStore(BaseCacheStore):
             return True
             
         except sqlite3.Error as e:
-            logger.error(f"Error deleting key from SQLite cache: {e}")
-            return False
+            raise CacheOperationError(f"Failed to delete key '{key}' from SQLite cache", original_exception=e) from e
         finally:
             self._return_connection(conn)
 
     async def clear(self) -> None:
         """Clear all items from the cache."""
         if self._closed:
-            raise RuntimeError("SQLiteCacheStore is closed")
+            raise CacheOperationError("Cache store is closed")
             
         conn = await self._get_connection()
         try:
@@ -227,15 +225,14 @@ class SQLiteCacheStore(BaseCacheStore):
             cursor.execute(f"DELETE FROM {self.table_name}")
             conn.commit()
         except sqlite3.Error as e:
-            logger.error(f"Error clearing SQLite cache: {e}")
-            raise
+            raise CacheOperationError("Failed to clear SQLite cache", original_exception=e) from e
         finally:
             self._return_connection(conn)
 
     async def size(self) -> int:
         """Get the number of items in the cache."""
         if self._closed:
-            raise RuntimeError("SQLiteCacheStore is closed")
+            raise CacheOperationError("Cache store is closed")
             
         conn = await self._get_connection()
         try:
@@ -243,15 +240,14 @@ class SQLiteCacheStore(BaseCacheStore):
             cursor.execute(f"SELECT COUNT(*) as count FROM {self.table_name}")
             return cursor.fetchone()[0] or 0
         except sqlite3.Error as e:
-            logger.error(f"Error getting SQLite cache size: {e}")
-            return 0
+            raise CacheOperationError("Failed to get SQLite cache size", original_exception=e) from e
         finally:
             self._return_connection(conn)
 
     async def enforce_limits(self, resource_limits: Any) -> None:
         """Enforce cache size limits."""
         if self._closed:
-            raise RuntimeError("SQLiteCacheStore is closed")
+            raise CacheOperationError("Cache store is closed")
             
         conn = await self._get_connection()
         try:
@@ -271,8 +267,7 @@ class SQLiteCacheStore(BaseCacheStore):
                 
             conn.commit()
         except sqlite3.Error as e:
-            logger.error(f"Error enforcing SQLite cache limits: {e}")
-            raise
+            raise CacheOperationError("Failed to enforce SQLite cache limits", original_exception=e) from e
         finally:
             self._return_connection(conn)
 
@@ -308,7 +303,7 @@ class SQLiteCacheStore(BaseCacheStore):
     async def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
         if self._closed:
-            raise RuntimeError("SQLiteCacheStore is closed")
+            raise CacheOperationError("Cache store is closed")
             
         conn = await self._get_connection()
         try:
@@ -336,7 +331,6 @@ class SQLiteCacheStore(BaseCacheStore):
                 "closed": self._closed
             }
         except sqlite3.Error as e:
-            logger.error(f"Error getting SQLite cache stats: {e}")
-            return {"error": str(e)}
+            raise CacheOperationError("Failed to get SQLite cache stats", original_exception=e) from e
         finally:
             self._return_connection(conn)

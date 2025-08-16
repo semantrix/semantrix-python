@@ -16,6 +16,7 @@ from pymongo.collection import Collection
 from pymongo.errors import PyMongoError
 
 from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy
+from semantrix.exceptions import CacheOperationError
 from semantrix.utils.datetime_utils import utc_now
 
 # Configure logging
@@ -112,7 +113,7 @@ class MongoDBCacheStore(BaseCacheStore):
                 except PyMongoError as e:
                     self._connected = False
                     logger.error(f"Failed to connect to MongoDB: {e}")
-                    raise
+                    raise CacheOperationError("Failed to connect to MongoDB", original_exception=e) from e
 
     async def _ensure_ttl_index(self) -> None:
         """Ensure TTL index exists on the collection."""
@@ -144,7 +145,7 @@ class MongoDBCacheStore(BaseCacheStore):
                 
         except PyMongoError as e:
             logger.error(f"Error ensuring TTL index: {e}")
-            raise
+            raise CacheOperationError("Failed to ensure TTL index", original_exception=e) from e
 
     async def get_exact(self, prompt: str) -> Optional[str]:
         """Get a cached response if it exists and is not expired."""
@@ -186,14 +187,14 @@ class MongoDBCacheStore(BaseCacheStore):
             
         except PyMongoError as e:
             logger.error(f"Error getting item from MongoDB cache: {e}")
-            return None
+            raise CacheOperationError("Failed to get item from MongoDB", original_exception=e) from e
 
     async def add(self, prompt: str, response: str, ttl: Optional[float] = None) -> None:
         """Add a response to the cache."""
         try:
             await self._ensure_connected()
             if not self._collection:
-                raise RuntimeError("MongoDB collection not available")
+                raise CacheOperationError("MongoDB collection not available")
                 
             now = utc_now()
             expires_at = (
@@ -224,7 +225,7 @@ class MongoDBCacheStore(BaseCacheStore):
             
         except PyMongoError as e:
             logger.error(f"Error adding item to MongoDB cache: {e}")
-            raise
+            raise CacheOperationError("Failed to add item to MongoDB", original_exception=e) from e
             
     async def delete(self, key: str) -> bool:
         """
@@ -250,7 +251,7 @@ class MongoDBCacheStore(BaseCacheStore):
             
         except PyMongoError as e:
             logger.error(f"Error deleting key from MongoDB cache: {e}")
-            return False
+            raise CacheOperationError(f"Failed to delete key from MongoDB: {key}", original_exception=e) from e
 
     async def clear(self) -> None:
         """Clear all items from the cache."""
@@ -266,7 +267,7 @@ class MongoDBCacheStore(BaseCacheStore):
                     await self._ensure_ttl_index()
         except PyMongoError as e:
             logger.error(f"Error clearing MongoDB cache: {e}")
-            raise
+            raise CacheOperationError("Failed to clear MongoDB cache", original_exception=e) from e
 
     async def size(self) -> int:
         """Get the number of items in the cache."""
@@ -287,7 +288,7 @@ class MongoDBCacheStore(BaseCacheStore):
             
         except PyMongoError as e:
             logger.error(f"Error getting MongoDB cache size: {e}")
-            return 0
+            raise CacheOperationError("Failed to get MongoDB cache size", original_exception=e) from e
 
     async def enforce_limits(self, resource_limits: Any) -> None:
         """Enforce cache size limits."""
@@ -306,7 +307,7 @@ class MongoDBCacheStore(BaseCacheStore):
                 
         except PyMongoError as e:
             logger.error(f"Error enforcing MongoDB cache limits: {e}")
-            raise
+            raise CacheOperationError("Failed to enforce MongoDB cache limits", original_exception=e) from e
 
     def get_eviction_policy(self) -> EvictionPolicy:
         """Get the eviction policy for this cache store."""
@@ -319,8 +320,9 @@ class MongoDBCacheStore(BaseCacheStore):
                 self._client.close()
                 self._connected = False
                 logger.info("Closed MongoDB connection")
-            except Exception as e:
+            except PyMongoError as e:
                 logger.error(f"Error closing MongoDB connection: {e}")
+                raise CacheOperationError("Failed to close MongoDB connection", original_exception=e) from e
 
     async def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
@@ -351,7 +353,7 @@ class MongoDBCacheStore(BaseCacheStore):
             
         except PyMongoError as e:
             logger.error(f"Error getting MongoDB cache stats: {e}")
-            return {"error": str(e)}
+            raise CacheOperationError("Failed to get MongoDB stats", original_exception=e) from e
 
     def __del__(self) -> None:
         """Ensure connection is closed when the object is garbage collected."""

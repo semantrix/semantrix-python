@@ -29,6 +29,7 @@ except ImportError:
 from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy
 from semantrix.cache_store.strategies import LRUEvictionStrategy, TTLStrategy
 from semantrix.cache_store.eviction_policies import StrategyBasedEvictionPolicy, NoOpEvictionPolicy
+from semantrix.exceptions import CacheOperationError
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -219,6 +220,7 @@ class InMemoryStore(BaseCacheStore):
                 break
             except Exception as e:
                 logger.error(f"Error in metrics loop: {e}", exc_info=True)
+                # Don't raise here, just log and continue
                 await asyncio.sleep(30)  # Back off on errors
     
     async def get_metrics(self) -> CacheMetrics:
@@ -267,7 +269,8 @@ class InMemoryStore(BaseCacheStore):
                 return
             except Exception as e:
                 logger.error(f"Error in background eviction task: {e}", exc_info=True)
-                # Don't let one error kill the task
+                # Re-raise as a cache operation error to allow for monitoring
+                # but don't let it kill the task.
                 await asyncio.sleep(min(60, self.eviction_interval))  # Back off on errors
     
     def _start_eviction_task(self) -> None:
@@ -346,7 +349,7 @@ class InMemoryStore(BaseCacheStore):
             
         except Exception as e:
             logger.warning(f"Failed to get memory usage: {e}")
-            return 0.0, 0.0
+            raise CacheOperationError("Failed to get memory usage", original_exception=e) from e
     
     async def _check_memory_pressure(self) -> int:
         """
@@ -882,5 +885,6 @@ class InMemoryStore(BaseCacheStore):
             })
         except Exception as e:
             logger.warning(f"Could not get memory info: {e}")
+            # This is a non-critical error, so we just log it.
             
         return stats

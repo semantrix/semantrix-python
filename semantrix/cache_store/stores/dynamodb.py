@@ -18,6 +18,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy
+from semantrix.exceptions import CacheOperationError
 from semantrix.utils.datetime_utils import utc_now
 
 # Configure logging
@@ -78,7 +79,7 @@ class DynamoDBCacheStore(BaseCacheStore):
                     None, self._table.table_status
                 )
                 return
-            except Exception:
+            except ClientError:
                 self._connected = False
         
         async with self._lock:
@@ -112,10 +113,10 @@ class DynamoDBCacheStore(BaseCacheStore):
                     self._connected = True
                     logger.info(f"Connected to DynamoDB table: {self.table_name}")
                     
-                except Exception as e:
+                except ClientError as e:
                     self._connected = False
                     logger.error(f"Failed to connect to DynamoDB: {e}")
-                    raise
+                    raise CacheOperationError("Failed to connect to DynamoDB", original_exception=e) from e
     
     async def _ensure_table_exists(self) -> None:
         """Ensure the DynamoDB table exists and is properly configured."""
@@ -208,9 +209,9 @@ class DynamoDBCacheStore(BaseCacheStore):
             
             return item.get('value')
             
-        except Exception as e:
+        except ClientError as e:
             logger.error(f"Error getting item from DynamoDB cache: {e}")
-            return None
+            raise CacheOperationError("Failed to get item from DynamoDB", original_exception=e) from e
     
     async def _update_last_accessed(self, key: str) -> None:
         """Update the last accessed time for an item."""
@@ -227,8 +228,9 @@ class DynamoDBCacheStore(BaseCacheStore):
                     }
                 )
             )
-        except Exception as e:
+        except ClientError as e:
             logger.warning(f"Failed to update last accessed time: {e}")
+            raise CacheOperationError("Failed to update last accessed time for item", original_exception=e) from e
     
     async def add(self, prompt: str, response: str, ttl: Optional[float] = None) -> None:
         """Add a response to the cache."""
@@ -257,9 +259,9 @@ class DynamoDBCacheStore(BaseCacheStore):
                 lambda: self._table.put_item(Item=item)
             )
             
-        except Exception as e:
+        except ClientError as e:
             logger.error(f"Error adding item to DynamoDB cache: {e}")
-            raise
+            raise CacheOperationError("Failed to add item to DynamoDB", original_exception=e) from e
             
     async def delete(self, key: str) -> bool:
         """
@@ -286,9 +288,9 @@ class DynamoDBCacheStore(BaseCacheStore):
             # If Attributes is in the response, the item existed and was deleted
             return 'Attributes' in response
             
-        except Exception as e:
+        except ClientError as e:
             logger.error(f"Error deleting key from DynamoDB cache: {e}")
-            return False
+            raise CacheOperationError(f"Failed to delete key from DynamoDB: {key}", original_exception=e) from e
     
     async def clear(self) -> None:
         """Clear all items from the cache."""
@@ -315,9 +317,9 @@ class DynamoDBCacheStore(BaseCacheStore):
                     break
                 scan_params['ExclusiveStartKey'] = response['LastEvaluatedKey']
                 
-        except Exception as e:
+        except ClientError as e:
             logger.error(f"Error clearing DynamoDB cache: {e}")
-            raise
+            raise CacheOperationError("Failed to clear DynamoDB cache", original_exception=e) from e
     
     async def size(self) -> int:
         """Get the number of items in the cache."""
@@ -338,9 +340,9 @@ class DynamoDBCacheStore(BaseCacheStore):
             
             return response.get('Count', 0)
             
-        except Exception as e:
+        except ClientError as e:
             logger.error(f"Error getting DynamoDB cache size: {e}")
-            return 0
+            raise CacheOperationError("Failed to get DynamoDB cache size", original_exception=e) from e
     
     async def enforce_limits(self, resource_limits: Any) -> None:
         """Enforce cache size limits."""
@@ -401,9 +403,9 @@ class DynamoDBCacheStore(BaseCacheStore):
             
             return stats
             
-        except Exception as e:
+        except ClientError as e:
             logger.error(f"Error getting DynamoDB cache stats: {e}")
-            return {'error': str(e)}
+            raise CacheOperationError("Failed to get DynamoDB cache stats", original_exception=e) from e
     
     def __del__(self) -> None:
         """Ensure resources are cleaned up."""

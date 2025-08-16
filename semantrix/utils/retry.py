@@ -11,6 +11,7 @@ import random
 import time
 from typing import Any, Awaitable, Callable, Optional, Type, TypeVar, Union, cast
 
+from semantrix.exceptions import RetryError
 from typing_extensions import ParamSpec, TypeAlias
 
 T = TypeVar("T")
@@ -85,12 +86,16 @@ def retry(
 
                 # If we've exhausted all retries, raise the last exception
                 logger.error(
-                    "All %s attempts failed. Last error: %s",
+                    "All %s attempts failed for function %s. Last error: %s",
                     max_retries + 1,
+                    func.__name__,
                     str(last_exception),
                     exc_info=True,
                 )
-                raise last_exception  # type: ignore
+                raise RetryError(
+                    f"All {max_retries + 1} attempts failed for function {func.__name__}.",
+                    original_exception=last_exception,
+                ) from last_exception
 
             return cast(FuncT[P, R], async_wrapper)
 
@@ -127,12 +132,16 @@ def retry(
 
                 # If we've exhausted all retries, raise the last exception
                 logger.error(
-                    "All %s attempts failed. Last error: %s",
+                    "All %s attempts failed for function %s. Last error: %s",
                     max_retries + 1,
+                    func.__name__,
                     str(last_exception),
                     exc_info=True,
                 )
-                raise last_exception  # type: ignore
+                raise RetryError(
+                    f"All {max_retries + 1} attempts failed for function {func.__name__}.",
+                    original_exception=last_exception,
+                ) from last_exception
 
             return cast(FuncT[P, R], sync_wrapper)
 

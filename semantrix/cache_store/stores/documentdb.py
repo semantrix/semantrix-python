@@ -12,9 +12,12 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Union
 
 from boto3 import client as boto3_client
+from botocore.exceptions import ClientError
 from pymongo import MongoClient, errors
 from pymongo.database import Database
 from pymongo.collection import Collection
+
+from semantrix.exceptions import CacheOperationError
 
 from .mongodb import MongoDBCacheStore
 
@@ -84,9 +87,9 @@ class DocumentDBCacheStore(MongoDBCacheStore):
                 Region=self.region_name
             )
             return auth_token
-        except Exception as e:
+        except ClientError as e:
             logger.error(f"Failed to generate DocumentDB auth token: {e}")
-            raise
+            raise CacheOperationError("Failed to generate DocumentDB auth token", original_exception=e) from e
     
     async def _get_cluster_endpoints(self) -> Dict[str, str]:
         """Discover DocumentDB cluster endpoints."""
@@ -108,9 +111,9 @@ class DocumentDBCacheStore(MongoDBCacheStore):
                            if m.get('IsClusterWriter') is False],
                 'writer': cluster.get('Endpoint')
             }
-        except Exception as e:
+        except ClientError as e:
             logger.error(f"Failed to discover DocumentDB endpoints: {e}")
-            raise
+            raise CacheOperationError("Failed to discover DocumentDB endpoints", original_exception=e) from e
     
     async def _build_connection_string(self) -> str:
         """Build the MongoDB connection string for DocumentDB."""
@@ -141,9 +144,9 @@ class DocumentDBCacheStore(MongoDBCacheStore):
             
             return connection_string
             
-        except Exception as e:
+        except (ValueError, ClientError) as e:
             logger.error(f"Failed to build DocumentDB connection string: {e}")
-            raise
+            raise CacheOperationError("Failed to build DocumentDB connection string", original_exception=e) from e
     
     async def _get_mongo_client(self) -> MongoClient:
         """Create and configure a MongoDB client for DocumentDB."""
@@ -193,7 +196,7 @@ class DocumentDBCacheStore(MongoDBCacheStore):
                     None, self._client.admin.command, 'ping'
                 )
                 return
-            except Exception:
+            except errors.PyMongoError:
                 # Connection lost, will reconnect
                 self._connected = False
                 if self._client:
@@ -220,10 +223,10 @@ class DocumentDBCacheStore(MongoDBCacheStore):
                     self._connected = True
                     logger.info(f"Connected to DocumentDB cluster: {self.cluster_identifier}")
                     
-                except Exception as e:
+                except (errors.PyMongoError, ClientError) as e:
                     self._connected = False
                     logger.error(f"Failed to connect to DocumentDB: {e}")
-                    raise
+                    raise CacheOperationError("Failed to connect to DocumentDB", original_exception=e) from e
     
     async def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics with DocumentDB-specific metrics."""
@@ -259,6 +262,6 @@ class DocumentDBCacheStore(MongoDBCacheStore):
             
             return stats
             
-        except Exception as e:
+        except errors.PyMongoError as e:
             logger.error(f"Error getting DocumentDB cache stats: {e}")
-            return {"error": str(e)}
+            raise CacheOperationError("Failed to get DocumentDB stats", original_exception=e) from e

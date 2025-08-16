@@ -15,6 +15,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy
+from semantrix.exceptions import CacheOperationError
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ class ElastiCacheStore(BaseCacheStore):
                 # Simple ping to check connection
                 await self._client.ping()
                 return
-            except Exception:
+            except RedisError:
                 self._connected = False
                 if self._client:
                     await self._client.close()
@@ -110,10 +111,10 @@ class ElastiCacheStore(BaseCacheStore):
                     self._connected = True
                     logger.info(f"Connected to ElastiCache at {self.endpoint}:{self.port} ({'Redis' if self.use_redis else 'Memcached'})")
                     
-                except Exception as e:
+                except RedisError as e:
                     self._connected = False
                     logger.error(f"Failed to connect to ElastiCache: {e}")
-                    raise
+                    raise CacheOperationError("Failed to connect to ElastiCache", original_exception=e) from e
     
     async def get_exact(self, prompt: str) -> Optional[str]:
         """Get a cached response if it exists and is not expired."""
@@ -131,14 +132,14 @@ class ElastiCacheStore(BaseCacheStore):
             
         except RedisError as e:
             logger.error(f"Error getting item from ElastiCache: {e}")
-            return None
+            raise CacheOperationError("Failed to get item from ElastiCache", original_exception=e) from e
     
     async def add(self, prompt: str, response: str, ttl: Optional[float] = None) -> None:
         """Add a response to the cache."""
         try:
             await self._ensure_connected()
             if not self._client:
-                raise RuntimeError("Not connected to ElastiCache")
+                raise CacheOperationError("Not connected to ElastiCache")
             
             # Convert ttl to milliseconds for Redis
             ttl_ms = int(ttl * 1000) if ttl is not None else None
@@ -162,7 +163,7 @@ class ElastiCacheStore(BaseCacheStore):
             
         except RedisError as e:
             logger.error(f"Error adding item to ElastiCache: {e}")
-            raise
+            raise CacheOperationError("Failed to add item to ElastiCache", original_exception=e) from e
             
     async def delete(self, key: str) -> bool:
         """
@@ -190,7 +191,7 @@ class ElastiCacheStore(BaseCacheStore):
             
         except RedisError as e:
             logger.error(f"Error deleting key from ElastiCache: {e}")
-            return False
+            raise CacheOperationError(f"Failed to delete key from ElastiCache: {key}", original_exception=e) from e
     
     async def clear(self) -> None:
         """Clear all items from the cache."""
@@ -200,7 +201,7 @@ class ElastiCacheStore(BaseCacheStore):
                 await self._client.flushdb()
         except RedisError as e:
             logger.error(f"Error clearing ElastiCache: {e}")
-            raise
+            raise CacheOperationError("Failed to clear ElastiCache", original_exception=e) from e
     
     async def size(self) -> int:
         """Get the number of items in the cache."""
@@ -217,7 +218,7 @@ class ElastiCacheStore(BaseCacheStore):
             
         except RedisError as e:
             logger.error(f"Error getting ElastiCache size: {e}")
-            return 0
+            raise CacheOperationError("Failed to get ElastiCache size", original_exception=e) from e
     
     async def enforce_limits(self, resource_limits: Any) -> None:
         """Enforce cache size limits."""
@@ -234,7 +235,7 @@ class ElastiCacheStore(BaseCacheStore):
                 
         except RedisError as e:
             logger.error(f"Error enforcing ElastiCache limits: {e}")
-            raise
+            raise CacheOperationError("Failed to enforce ElastiCache limits", original_exception=e) from e
     
     def get_eviction_policy(self) -> EvictionPolicy:
         """Get the eviction policy for this cache store."""
@@ -247,8 +248,9 @@ class ElastiCacheStore(BaseCacheStore):
                 await self._client.close()
                 self._connected = False
                 logger.info("Closed ElastiCache connection")
-            except Exception as e:
+            except RedisError as e:
                 logger.error(f"Error closing ElastiCache connection: {e}")
+                raise CacheOperationError("Failed to close ElastiCache connection", original_exception=e) from e
     
     async def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
@@ -286,9 +288,9 @@ class ElastiCacheStore(BaseCacheStore):
             
             return stats
             
-        except Exception as e:
+        except RedisError as e:
             logger.error(f"Error getting ElastiCache stats: {e}")
-            return {"error": str(e)}
+            raise CacheOperationError("Failed to get ElastiCache stats", original_exception=e) from e
     
     def __del__(self) -> None:
         """Ensure connection is closed when the object is garbage collected."""

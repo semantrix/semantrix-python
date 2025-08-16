@@ -8,7 +8,11 @@ import json
 import time
 import logging
 from typing import Optional, Any, Dict, Union
+
+from redis.exceptions import RedisError
+
 from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy
+from semantrix.exceptions import CacheOperationError, ValidationError
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -58,11 +62,12 @@ class RedisCacheStore(BaseCacheStore):
                     try:
                         data = json.loads(value)
                         return data.get('response')
-                    except (json.JSONDecodeError, KeyError, AttributeError) as e:
-                        logger.warning(f"Error decoding cached value: {e}")
-                        return str(value)
-        except Exception as e:
-            logger.error(f"Error getting value from Redis: {e}")
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Failed to decode JSON from cache key {key}: {e}")
+                        raise ValidationError(f"Corrupt data in cache for key {key}.", original_exception=e) from e
+        except RedisError as e:
+            logger.error(f"Redis error getting value for key {key}: {e}")
+            raise CacheOperationError(f"Failed to get value from Redis for key {key}", original_exception=e) from e
         return None
 
     async def add(self, prompt: str, response: str) -> None:
@@ -85,9 +90,9 @@ class RedisCacheStore(BaseCacheStore):
                     await self.redis.set(key, json.dumps(data))
                 else:  # redis-py
                     self.redis.set(key, json.dumps(data))
-        except Exception as e:
-            logger.error(f"Error adding value to Redis: {e}")
-            raise
+        except RedisError as e:
+            logger.error(f"Redis error adding value for key {key}: {e}")
+            raise CacheOperationError(f"Failed to add value to Redis for key {key}", original_exception=e) from e
 
     async def enforce_limits(self, resource_limits: Any) -> None:
         """
@@ -117,9 +122,9 @@ class RedisCacheStore(BaseCacheStore):
                     deleted = self.redis.delete(cache_key)
                 return bool(deleted > 0)
             return False
-        except Exception as e:
-            logger.error(f"Error deleting key from Redis: {e}")
-            return False
+        except RedisError as e:
+            logger.error(f"Redis error deleting key {cache_key}: {e}")
+            raise CacheOperationError(f"Failed to delete key from Redis: {cache_key}", original_exception=e) from e
 
     async def clear(self) -> None:
         """Clear all cached items from Redis asynchronously."""
@@ -139,9 +144,9 @@ class RedisCacheStore(BaseCacheStore):
                             await self.redis.delete(*keys)
                         else:  # redis-py
                             self.redis.delete(*keys)
-        except Exception as e:
-            logger.error(f"Error clearing Redis cache: {e}")
-            raise
+        except RedisError as e:
+            logger.error(f"Redis error clearing cache: {e}")
+            raise CacheOperationError("Failed to clear Redis cache", original_exception=e) from e
 
     async def size(self) -> int:
         """Get the number of cached items asynchronously."""
@@ -149,9 +154,9 @@ class RedisCacheStore(BaseCacheStore):
             if hasattr(self.redis, 'scan_iter'):
                 return sum(1 for _ in self.redis.scan_iter(f"{self.key_prefix}*"))
             return 0
-        except Exception as e:
-            logger.error(f"Error getting cache size: {e}")
-            return 0
+        except RedisError as e:
+            logger.error(f"Redis error getting cache size: {e}")
+            raise CacheOperationError("Failed to get cache size from Redis", original_exception=e) from e
 
     def get_eviction_policy(self) -> EvictionPolicy:
         return self.eviction_policy
@@ -171,7 +176,8 @@ class RedisCacheStore(BaseCacheStore):
                     stats['connected'] = await self.redis.ping()
                 else:  # redis-py
                     stats['connected'] = self.redis.ping()
-        except Exception as e:
+        except RedisError as e:
             logger.error(f"Error getting Redis stats: {e}")
+            raise CacheOperationError("Failed to get Redis stats", original_exception=e) from e
             
         return stats

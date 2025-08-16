@@ -8,7 +8,9 @@ import json
 import time
 import logging
 from typing import Optional, Any, Dict, Union
+
 from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy
+from semantrix.exceptions import CacheOperationError
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -65,7 +67,7 @@ class MemcachedCacheStore(BaseCacheStore):
                         return str(value)
         except Exception as e:
             logger.error(f"Error getting value from Memcached: {e}")
-        return None
+            raise CacheOperationError("Failed to get item from Memcached", original_exception=e) from e
 
     async def add(self, prompt: str, response: str) -> None:
         """
@@ -90,7 +92,7 @@ class MemcachedCacheStore(BaseCacheStore):
                     self.client.set(key, value)
         except Exception as e:
             logger.error(f"Error adding value to Memcached: {e}")
-            raise
+            raise CacheOperationError("Failed to add item to Memcached", original_exception=e) from e
 
     async def enforce_limits(self, resource_limits: Any) -> None:
         """
@@ -123,7 +125,7 @@ class MemcachedCacheStore(BaseCacheStore):
             return False
         except Exception as e:
             logger.error(f"Error deleting key from Memcached: {e}")
-            return False
+            raise CacheOperationError(f"Failed to delete key from Memcached", original_exception=e) from e
 
     async def clear(self) -> None:
         """Clear all cached items from Memcached asynchronously."""
@@ -135,7 +137,7 @@ class MemcachedCacheStore(BaseCacheStore):
                     self.client.flush_all()
         except Exception as e:
             logger.error(f"Error clearing Memcached cache: {e}")
-            raise
+            raise CacheOperationError("Failed to clear Memcached cache", original_exception=e) from e
 
     async def size(self) -> int:
         """Get the number of cached items asynchronously."""
@@ -150,7 +152,7 @@ class MemcachedCacheStore(BaseCacheStore):
             return 0
         except Exception as e:
             logger.error(f"Error getting cache size: {e}")
-            return 0
+            raise CacheOperationError("Failed to get Memcached cache size", original_exception=e) from e
 
     def get_eviction_policy(self) -> EvictionPolicy:
         return self.eviction_policy
@@ -181,5 +183,6 @@ class MemcachedCacheStore(BaseCacheStore):
                     stats['memcached_stats'] = dict(raw_stats)
         except Exception as e:
             logger.error(f"Error getting Memcached stats: {e}")
+            raise CacheOperationError("Failed to get Memcached stats", original_exception=e) from e
             
         return stats

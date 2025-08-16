@@ -14,6 +14,13 @@ from semantrix.utils.wal import WriteAheadLog, OperationType, create_wal
 from semantrix.utils.retry import retry
 from semantrix.utils.twophase import TwoPhaseCoordinator, Participant, TwoPhaseOperation, TwoPhaseState
 from semantrix.models.explain import ExplainResult, CacheMatch, create_explain_result
+from semantrix.exceptions import (
+    OperationError,
+    ValidationError,
+    CacheOperationError,
+    VectorOperationError,
+    ConfigurationError
+)
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -29,7 +36,8 @@ class CacheStoreParticipant(Participant):
             # For cache store, prepare is a no-op as we can't lock individual keys
             return True, None
         except Exception as e:
-            return False, str(e)
+            err = CacheOperationError(f"Failed to prepare cache store: {e}", original_exception=e)
+            return False, str(err)
     
     async def commit(self, operation: TwoPhaseOperation) -> Tuple[bool, Optional[str]]:
         try:
@@ -43,7 +51,9 @@ class CacheStoreParticipant(Participant):
             return True, None
         except Exception as e:
             logger.error(f"Error in CacheStoreParticipant.commit: {e}", exc_info=True)
-            return False, str(e)
+            # Wrap in CacheOperationError before returning string representation
+            err = CacheOperationError(f"Failed to commit to cache store: {e}", original_exception=e)
+            return False, str(err)
     
     async def rollback(self, operation: TwoPhaseOperation) -> Tuple[bool, Optional[str]]:
         try:
@@ -56,7 +66,8 @@ class CacheStoreParticipant(Participant):
             return True, None
         except Exception as e:
             logger.error(f"Error during cache store rollback: {e}", exc_info=True)
-            return False, str(e)
+            err = CacheOperationError(f"Failed to rollback cache store: {e}", original_exception=e)
+            return False, str(err)
 
 class VectorStoreParticipant(Participant):
     """Participant for vector store operations in 2PC."""
@@ -69,7 +80,8 @@ class VectorStoreParticipant(Participant):
             # For vector store, prepare is a no-op as we can't lock individual vectors
             return True, None
         except Exception as e:
-            return False, str(e)
+            err = VectorOperationError(f"Failed to prepare vector store: {e}", original_exception=e)
+            return False, str(err)
     
     async def commit(self, operation: TwoPhaseOperation) -> Tuple[bool, Optional[str]]:
         try:
@@ -81,12 +93,12 @@ class VectorStoreParticipant(Participant):
                 if 'embedding' not in operation.data:
                     error_msg = "Missing 'embedding' in operation data"
                     logger.error(f"[2PC] {error_msg}")
-                    return False, error_msg
+                    return False, str(ValidationError(error_msg))
                     
                 if 'prompt' not in operation.data:
                     error_msg = "Missing 'prompt' in operation data"
                     logger.error(f"[2PC] {error_msg}")
-                    return False, error_msg
+                    return False, str(ValidationError(error_msg))
                 
                 embedding = operation.data['embedding']
                 prompt = operation.data['prompt']
@@ -119,7 +131,7 @@ class VectorStoreParticipant(Participant):
                 if not embeddings:
                     error_msg = "No embeddings provided in operation data"
                     logger.error(f"[2PC] {error_msg}")
-                    return False, error_msg
+                    return False, str(ValidationError(error_msg))
                 
                 logger.debug(f"[2PC] Processed embeddings - Count: {len(embeddings)}, "
                            f"First embedding type: {type(embeddings[0]).__name__ if embeddings else 'N/A'}, "
@@ -141,7 +153,8 @@ class VectorStoreParticipant(Participant):
                 except Exception as e:
                     error_msg = f"Error in vector_store.add: {str(e)}"
                     logger.error(f"[2PC] {error_msg}", exc_info=True)
-                    return False, error_msg
+                    err = VectorOperationError(error_msg, original_exception=e)
+                    return False, str(err)
                     
             elif operation.operation_type == OperationType.DELETE:
                 # Get the ID to delete from the operation data
@@ -149,7 +162,7 @@ class VectorStoreParticipant(Participant):
                 if not delete_id:
                     error_msg = "No ID provided for delete operation"
                     logger.error(f"[2PC] {error_msg}")
-                    return False, error_msg
+                    return False, str(ValidationError(error_msg))
                 
                 try:
                     logger.debug(f"[2PC] Deleting vector with ID: {delete_id}")
@@ -160,7 +173,8 @@ class VectorStoreParticipant(Participant):
                 except Exception as e:
                     error_msg = f"Error in vector_store.delete: {str(e)}"
                     logger.error(f"[2PC] {error_msg}", exc_info=True)
-                    return False, error_msg
+                    err = VectorOperationError(error_msg, original_exception=e)
+                    return False, str(err)
             else:
                 error_msg = f"Unsupported operation type: {operation.operation_type}"
                 logger.error(f"[2PC] {error_msg}")
@@ -169,7 +183,8 @@ class VectorStoreParticipant(Participant):
         except Exception as e:
             error_msg = f"Unexpected error in VectorStoreParticipant.commit: {str(e)}"
             logger.error(f"[2PC] {error_msg}", exc_info=True)
-            return False, error_msg
+            err = VectorOperationError(error_msg, original_exception=e)
+            return False, str(err)
     
     async def rollback(self, operation: TwoPhaseOperation) -> Tuple[bool, Optional[str]]:
         try:
@@ -178,7 +193,8 @@ class VectorStoreParticipant(Participant):
                 await self.vector_store.delete(operation.data['prompt'])
             return True, None
         except Exception as e:
-            return False, str(e)
+            err = VectorOperationError(f"Failed to rollback vector store: {e}", original_exception=e)
+            return False, str(err)
 
 class Semantrix:
     def __init__(
@@ -282,7 +298,7 @@ class Semantrix:
             # Create a new task for this operation
             task = asyncio.current_task()
             if task is None:
-                raise RuntimeError("Operation must be run in an async context")
+                raise OperationError("Operation must be run in an async context")
                 
             self._pending_operations[op_id] = task
         
@@ -316,6 +332,8 @@ class Semantrix:
                     logger.error(f"Failed to recover operation: {operation.operation_id}")
             except Exception as e:
                 logger.error(f"Error recovering operation {operation.operation_id}: {e}", exc_info=True)
+                # Re-raising as a general OperationError to signal recovery failure
+                raise OperationError(f"Failed to recover operation {operation.operation_id}", original_exception=e)
     
     async def _execute_with_wal(
         self,
@@ -363,12 +381,12 @@ class Semantrix:
                     ]
                     error_msg = "Failed to execute operation atomically: " + "; ".join(error_msgs)
                     logger.error(error_msg)
-                    raise RuntimeError(error_msg)
+                    raise OperationError(error_msg)
                     
                 # Check if any participant raised an exception during commit
                 for i, (success, msg) in enumerate(operation.commit_results):
                     if not success and msg and "Simulated failure" in msg:
-                        raise RuntimeError(msg)
+                        raise OperationError(msg)
                 
                 # For SET operations, fetch the response from the cache store to ensure consistency
                 if operation_type == OperationType.SET:
@@ -409,7 +427,8 @@ class Semantrix:
             Result of the operation
             
         Raises:
-            ValueError: If the operation type is not supported
+            ValidationError: If the operation type is not supported
+            OperationError: If the operation fails due to an underlying store error
         """
         if operation_type == OperationType.SET:
             # Set operation (previously ADD)
@@ -424,20 +443,21 @@ class Semantrix:
             # Store in vector store and cache store
             # Note: This is not atomic!
             try:
-                await self.vector_store.add(embedding, prompt)
-                await self.cache_store.set(prompt, response)
+                await self.vector_store.add(vectors=[embedding], documents=[prompt])
+                await self.cache_store.add(prompt, response)
                 return {'success': True}
-            except Exception as e:
+            except (CacheOperationError, VectorOperationError) as e:
                 # Try to clean up if one operation succeeds and the other fails
+                logger.warning(f"Operation failed, attempting cleanup for prompt: {prompt}")
                 try:
                     await self.vector_store.delete(prompt)
-                except Exception:
-                    pass
+                except VectorOperationError as cleanup_e:
+                    logger.error(f"Cleanup failed for vector store: {cleanup_e}")
                 try:
                     await self.cache_store.delete(prompt)
-                except Exception:
-                    pass
-                raise
+                except CacheOperationError as cleanup_e:
+                    logger.error(f"Cleanup failed for cache store: {cleanup_e}")
+                raise OperationError(f"Failed to set prompt '{prompt}'", original_exception=e)
             
         elif operation_type == OperationType.DELETE:
             # Delete operation
@@ -451,10 +471,10 @@ class Semantrix:
             except Exception as e:
                 # If one operation fails, we can't do much
                 logger.error("Error during delete operation: %s", e)
-                raise
+                raise OperationError(f"Failed to delete prompt '{prompt}'", original_exception=e)
             
         else:
-            raise ValueError(f"Unsupported operation type: {operation_type}")
+            raise ValidationError(f"Unsupported operation type: {operation_type}")
     
     async def get(self, prompt: str, operation_id: Optional[str] = None) -> Optional[str]:
         """
@@ -493,7 +513,8 @@ class Semantrix:
                         return match
                 except Exception as e:
                     logger.error(f"Error during semantic search: {e}")
-                    # Continue to return None if there's an error
+                    # Wrap in VectorOperationError and re-raise
+                    raise VectorOperationError("Semantic search failed", original_exception=e)
                     
             return None
 

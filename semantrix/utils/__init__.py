@@ -1,1 +1,5 @@
-"""Semantrix utility modules."""`n`nfrom .retry import retry`n`n__all__ = ["retry"]
+"""Semantrix utility modules."""
+
+from .retry import retry
+
+__all__ = ["retry"]
