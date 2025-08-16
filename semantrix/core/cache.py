@@ -525,7 +525,6 @@ class Semantrix:
                     
             return None
 
-    @retry(max_retries=3, initial_delay=0.5, backoff_factor=2)
     async def set(self, prompt: str, response: str, operation_id: Optional[str] = None) -> None:
         """
         Add a prompt-response pair to the cache.
@@ -538,6 +537,11 @@ class Semantrix:
         validate_prompt(prompt)
         validate_response(response)
         validate_operation_id(operation_id)
+
+        return await self._set_with_retry(prompt, response, operation_id)
+
+    @retry(max_retries=3, initial_delay=0.5, backoff_factor=2)
+    async def _set_with_retry(self, prompt: str, response: str, operation_id: Optional[str] = None) -> None:
         # Generate embedding for the prompt
         embedding = await self.embedder.embed(prompt)
         
@@ -549,7 +553,7 @@ class Semantrix:
         }
         
         # Execute with WAL support and return the response
-        return await self._execute_with_wal(
+        await self._execute_with_wal(
             operation_type=OperationType.SET,
             data=operation_data,
             operation_id=operation_id
