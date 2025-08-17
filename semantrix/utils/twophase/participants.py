@@ -7,7 +7,8 @@ that need to participate in atomic operations.
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from semantrix.utils.twophase import Participant, TwoPhaseOperation
+from .participant import Participant
+from .operation import TwoPhaseOperation
 from semantrix.utils.wal import OperationType
 from semantrix.cache_store import BaseCacheStore
 from semantrix.vector_store import BaseVectorStore

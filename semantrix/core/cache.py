@@ -11,10 +11,11 @@ from semantrix.cache_store.base import DeletionMode
 from semantrix.utils.resource_limits import ResourceLimits
 from semantrix.utils.profiling import Profiler
 from semantrix.utils.wal import OperationType
-from semantrix.utils.twophase.wal_adapter import create_wal_from_config
 from semantrix.utils.retry import retry
-from semantrix.utils.twophase import TwoPhaseCoordinator, TwoPhaseOperation, TwoPhaseState
-from semantrix.utils.twophase.participants import CacheStoreParticipant, VectorStoreParticipant
+from semantrix.utils.twophase import (
+    TwoPhaseCoordinator, TwoPhaseOperation, TwoPhaseState,
+    CacheStoreParticipant, VectorStoreParticipant, create_wal_from_config
+)
 from semantrix.utils.validation import (
     validate_prompt,
     validate_response,
