@@ -9,7 +9,7 @@ import time
 import logging
 from typing import Optional, Any, Dict, Union
 
-from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy
+from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy, DeletionMode
 from semantrix.exceptions import CacheOperationError
 
 # Configure logging
@@ -47,6 +47,16 @@ class MemcachedCacheStore(BaseCacheStore):
         """
         key = self._get_key(prompt)
         try:
+            # Check if item is tombstoned
+            tombstone_key = f"{key}:tombstone"
+            if hasattr(self.client, 'get'):
+                if hasattr(self.client, 'get_multi'):  # aiomcache
+                    tombstone_value = await self.client.get(tombstone_key.encode('utf-8'))
+                else:  # pymemcache
+                    tombstone_value = self.client.get(tombstone_key)
+                if tombstone_value is not None:
+                    return None
+            
             if hasattr(self.client, 'get'):
                 # Handle both sync and async Memcached clients
                 if hasattr(self.client, 'get_multi'):  # aiomcache
@@ -103,16 +113,27 @@ class MemcachedCacheStore(BaseCacheStore):
         """
         pass
         
-    async def delete(self, key: str) -> bool:
+    async def delete(self, key: str, mode: DeletionMode = DeletionMode.DIRECT) -> bool:
         """
         Delete a key from the Memcached cache asynchronously.
         
         Args:
             key: The key to delete
+            mode: Deletion mode (DIRECT or TOMBSTONE)
             
         Returns:
             bool: True if the key was found and deleted, False otherwise
         """
+        if mode == DeletionMode.TOMBSTONE:
+            logger.info(f"Tombstoning requested for Memcached store, using direct deletion for key: {key}")
+            # Fall back to direct deletion for external stores
+            return await self._direct_delete(key)
+        
+        return await self._direct_delete(key)
+    
+    async def _direct_delete(self, key: str) -> bool:
+        """Direct deletion implementation."""
+        
         cache_key = self._get_key(key)
         try:
             if hasattr(self.client, 'delete'):
@@ -126,6 +147,70 @@ class MemcachedCacheStore(BaseCacheStore):
         except Exception as e:
             logger.error(f"Error deleting key from Memcached: {e}")
             raise CacheOperationError(f"Failed to delete key from Memcached", original_exception=e) from e
+    
+    async def tombstone(self, key: str) -> bool:
+        """
+        Mark a key as deleted (tombstoning) without removing it from storage.
+        
+        Note: Memcached doesn't support metadata, so we use a special prefix.
+        
+        Args:
+            key: The key to tombstone
+            
+        Returns:
+            bool: True if the key was found and tombstoned, False otherwise
+        """
+        cache_key = self._get_key(key)
+        tombstone_key = f"{cache_key}:tombstone"
+        try:
+            # Store a tombstone marker with a short TTL
+            if hasattr(self.client, 'set'):
+                if hasattr(self.client, 'get_multi'):  # aiomcache
+                    await self.client.set(tombstone_key.encode('utf-8'), b"1", ex=3600)  # 1 hour TTL
+                else:  # pymemcache
+                    self.client.set(tombstone_key, "1", exptime=3600)  # 1 hour TTL
+            return True
+        except Exception as e:
+            logger.error(f"Error tombstoning key in Memcached: {e}")
+            raise CacheOperationError(f"Failed to tombstone key in Memcached: {key}", original_exception=e) from e
+    
+    async def is_tombstoned(self, key: str) -> bool:
+        """
+        Check if a key is tombstoned.
+        
+        Args:
+            key: The key to check
+            
+        Returns:
+            bool: True if the key is tombstoned, False otherwise
+        """
+        cache_key = self._get_key(key)
+        tombstone_key = f"{cache_key}:tombstone"
+        try:
+            if hasattr(self.client, 'get'):
+                if hasattr(self.client, 'get_multi'):  # aiomcache
+                    result = await self.client.get(tombstone_key.encode('utf-8'))
+                else:  # pymemcache
+                    result = self.client.get(tombstone_key)
+                return result is not None
+            return False
+        except Exception as e:
+            logger.error(f"Error checking tombstone status in Memcached: {e}")
+            return False
+    
+    async def purge_tombstones(self) -> int:
+        """
+        Permanently remove all tombstoned keys from storage.
+        
+        Note: This is a simplified implementation for Memcached.
+        
+        Returns:
+            int: Number of tombstoned keys that were purged
+        """
+        # Memcached doesn't support scanning, so we can't efficiently purge tombstones
+        # The tombstone markers will expire automatically after 1 hour
+        logger.warning("Memcached doesn't support efficient tombstone purging. Tombstones will expire automatically.")
+        return 0
 
     async def clear(self) -> None:
         """Clear all cached items from Memcached asynchronously."""

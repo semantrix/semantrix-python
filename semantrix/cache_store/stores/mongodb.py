@@ -15,7 +15,7 @@ from pymongo.database import Database
 from pymongo.collection import Collection
 from pymongo.errors import PyMongoError
 
-from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy
+from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy, DeletionMode
 from semantrix.exceptions import CacheOperationError
 from semantrix.utils.datetime_utils import utc_now
 
@@ -154,11 +154,22 @@ class MongoDBCacheStore(BaseCacheStore):
             if not self._collection:
                 return None
                 
-            # Find documents that haven't expired
+            # Find documents that haven't expired and aren't tombstoned
             filter_query = {
-                "key": prompt, "$or": [
-                    {"expires_at": {"$exists": False}},
-                    {"expires_at": {"$gt": utc_now()}}
+                "key": prompt,
+                "$and": [
+                    {
+                        "$or": [
+                            {"expires_at": {"$exists": False}},
+                            {"expires_at": {"$gt": utc_now()}}
+                        ]
+                    },
+                    {
+                        "$or": [
+                            {"tombstoned": {"$exists": False}},
+                            {"tombstoned": False}
+                        ]
+                    }
                 ]
             }
 
@@ -227,16 +238,27 @@ class MongoDBCacheStore(BaseCacheStore):
             logger.error(f"Error adding item to MongoDB cache: {e}")
             raise CacheOperationError("Failed to add item to MongoDB", original_exception=e) from e
             
-    async def delete(self, key: str) -> bool:
+    async def delete(self, key: str, mode: DeletionMode = DeletionMode.DIRECT) -> bool:
         """
         Delete a key from the MongoDB cache.
         
         Args:
             key: The key to delete
+            mode: Deletion mode (DIRECT or TOMBSTONE)
             
         Returns:
             bool: True if the key was found and deleted, False otherwise
         """
+        if mode == DeletionMode.TOMBSTONE:
+            logger.info(f"Tombstoning requested for MongoDB store, using direct deletion for key: {key}")
+            # Fall back to direct deletion for external stores
+            return await self._direct_delete(key)
+        
+        return await self._direct_delete(key)
+    
+    async def _direct_delete(self, key: str) -> bool:
+        """Direct deletion implementation."""
+        
         try:
             await self._ensure_connected()
             if not self._collection:
@@ -252,6 +274,99 @@ class MongoDBCacheStore(BaseCacheStore):
         except PyMongoError as e:
             logger.error(f"Error deleting key from MongoDB cache: {e}")
             raise CacheOperationError(f"Failed to delete key from MongoDB: {key}", original_exception=e) from e
+    
+    async def tombstone(self, key: str) -> bool:
+        """
+        Mark a key as deleted (tombstoning) without removing it from storage.
+        
+        Args:
+            key: The key to tombstone
+            
+        Returns:
+            bool: True if the key was found and tombstoned, False otherwise
+        """
+        try:
+            await self._ensure_connected()
+            if not self._collection:
+                return False
+                
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._collection.update_one(
+                    {"key": key},
+                    {
+                        "$set": {
+                            "tombstoned": True,
+                            "tombstoned_at": utc_now()
+                        }
+                    }
+                )
+            )
+            
+            return result.modified_count > 0
+            
+        except PyMongoError as e:
+            logger.error(f"Error tombstoning key in MongoDB cache: {e}")
+            raise CacheOperationError(f"Failed to tombstone key in MongoDB: {key}", original_exception=e) from e
+    
+    async def is_tombstoned(self, key: str) -> bool:
+        """
+        Check if a key is tombstoned.
+        
+        Args:
+            key: The key to check
+            
+        Returns:
+            bool: True if the key is tombstoned, False otherwise
+        """
+        try:
+            await self._ensure_connected()
+            if not self._collection:
+                return False
+                
+            doc = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._collection.find_one(
+                    {"key": key},
+                    {"tombstoned": 1}
+                )
+            )
+            
+            return doc.get("tombstoned", False) if doc else False
+            
+        except PyMongoError as e:
+            logger.error(f"Error checking tombstone status in MongoDB cache: {e}")
+            return False
+    
+    async def purge_tombstones(self) -> int:
+        """
+        Permanently remove all tombstoned keys from storage.
+        
+        Returns:
+            int: Number of tombstoned keys that were purged
+        """
+        try:
+            await self._ensure_connected()
+            if not self._collection:
+                return 0
+                
+            # Count tombstoned items before deletion
+            count = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._collection.count_documents({"tombstoned": True})
+            )
+            
+            # Delete tombstoned items
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._collection.delete_many({"tombstoned": True})
+            )
+            
+            return count
+            
+        except PyMongoError as e:
+            logger.error(f"Error purging tombstones from MongoDB cache: {e}")
+            raise CacheOperationError("Failed to purge tombstones from MongoDB", original_exception=e) from e
 
     async def clear(self) -> None:
         """Clear all items from the cache."""

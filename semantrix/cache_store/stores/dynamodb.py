@@ -17,7 +17,7 @@ from boto3.dynamodb.conditions import Key
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy
+from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy, DeletionMode
 from semantrix.exceptions import CacheOperationError
 from semantrix.utils.datetime_utils import utc_now
 
@@ -199,6 +199,10 @@ class DynamoDBCacheStore(BaseCacheStore):
             if not item:
                 return None
                 
+            # Check if item is tombstoned
+            if item.get('tombstoned', False):
+                return None
+                
             # Check if item is expired
             current_time = int(time.time())
             if 'ttl' in item and item['ttl'] < current_time:
@@ -263,16 +267,27 @@ class DynamoDBCacheStore(BaseCacheStore):
             logger.error(f"Error adding item to DynamoDB cache: {e}")
             raise CacheOperationError("Failed to add item to DynamoDB", original_exception=e) from e
             
-    async def delete(self, key: str) -> bool:
+    async def delete(self, key: str, mode: DeletionMode = DeletionMode.DIRECT) -> bool:
         """
         Delete a key from the DynamoDB cache.
         
         Args:
             key: The key to delete
+            mode: Deletion mode (DIRECT or TOMBSTONE)
             
         Returns:
             bool: True if the key was found and deleted, False otherwise
         """
+        if mode == DeletionMode.TOMBSTONE:
+            logger.info(f"Tombstoning requested for DynamoDB store, using direct deletion for key: {key}")
+            # Fall back to direct deletion for external stores
+            return await self._direct_delete(key)
+        
+        return await self._direct_delete(key)
+    
+    async def _direct_delete(self, key: str) -> bool:
+        """Direct deletion implementation."""
+        
         try:
             await self._ensure_connected()
             
@@ -291,6 +306,110 @@ class DynamoDBCacheStore(BaseCacheStore):
         except ClientError as e:
             logger.error(f"Error deleting key from DynamoDB cache: {e}")
             raise CacheOperationError(f"Failed to delete key from DynamoDB: {key}", original_exception=e) from e
+    
+    async def tombstone(self, key: str) -> bool:
+        """
+        Mark a key as deleted (tombstoning) without removing it from storage.
+        
+        Args:
+            key: The key to tombstone
+            
+        Returns:
+            bool: True if the key was found and tombstoned, False otherwise
+        """
+        try:
+            await self._ensure_connected()
+            
+            # Update the item to mark it as tombstoned
+            response = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._table.update_item(
+                    Key={'key': key},
+                    UpdateExpression='SET tombstoned = :tombstoned, tombstoned_at = :tombstoned_at',
+                    ExpressionAttributeValues={
+                        ':tombstoned': True,
+                        ':tombstoned_at': int(time.time())
+                    },
+                    ReturnValues='ALL_NEW'
+                )
+            )
+            
+            # If Attributes is in the response, the item existed and was updated
+            return 'Attributes' in response
+            
+        except ClientError as e:
+            logger.error(f"Error tombstoning key in DynamoDB cache: {e}")
+            raise CacheOperationError(f"Failed to tombstone key in DynamoDB: {key}", original_exception=e) from e
+    
+    async def is_tombstoned(self, key: str) -> bool:
+        """
+        Check if a key is tombstoned.
+        
+        Args:
+            key: The key to check
+            
+        Returns:
+            bool: True if the key is tombstoned, False otherwise
+        """
+        try:
+            await self._ensure_connected()
+            
+            response = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._table.get_item(
+                    Key={'key': key},
+                    ProjectionExpression='tombstoned'
+                )
+            )
+            
+            item = response.get('Item')
+            return item.get('tombstoned', False) if item else False
+            
+        except ClientError as e:
+            logger.error(f"Error checking tombstone status in DynamoDB cache: {e}")
+            return False
+    
+    async def purge_tombstones(self) -> int:
+        """
+        Permanently remove all tombstoned keys from storage.
+        
+        Returns:
+            int: Number of tombstoned keys that were purged
+        """
+        try:
+            await self._ensure_connected()
+            
+            # Scan for tombstoned items
+            scan_params = {
+                'TableName': self.table_name,
+                'FilterExpression': 'tombstoned = :tombstoned',
+                'ExpressionAttributeValues': {':tombstoned': True},
+                'ProjectionExpression': 'key'
+            }
+            
+            purged_count = 0
+            
+            while True:
+                response = await asyncio.get_event_loop().run_in_executor(
+                    None, self._client.scan, scan_params
+                )
+                
+                # Delete tombstoned items in batch
+                with self._table.batch_writer() as batch:
+                    for item in response.get('Items', []):
+                        batch.delete_item(Key={'key': item['key']})
+                        purged_count += 1
+                
+                # If there are more items to delete
+                if 'LastEvaluatedKey' not in response:
+                    break
+                scan_params['ExclusiveStartKey'] = response['LastEvaluatedKey']
+            
+            return purged_count
+            
+        except ClientError as e:
+            logger.error(f"Error purging tombstones from DynamoDB cache: {e}")
+            raise CacheOperationError("Failed to purge tombstones from DynamoDB", original_exception=e) from e
     
     async def clear(self) -> None:
         """Clear all items from the cache."""

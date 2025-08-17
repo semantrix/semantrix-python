@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union, AsyncGenerator
 from semantrix.embedding import BaseEmbedder, get_embedder
 from semantrix.vector_store import BaseVectorStore, FAISSVectorStore
 from semantrix.cache_store import BaseCacheStore, InMemoryStore
+from semantrix.cache_store.base import DeletionMode
 from semantrix.utils.resource_limits import ResourceLimits
 from semantrix.utils.profiling import Profiler
 from semantrix.utils.wal import OperationType
@@ -83,6 +84,10 @@ class Semantrix:
         self._pending_operations: Dict[str, asyncio.Task] = {}
         self._operation_lock = asyncio.Lock()
         self._initialized = False
+        
+        # Background tombstone cleanup
+        self._tombstone_cleanup_task: Optional[asyncio.Task] = None
+        self._tombstone_cleanup_interval = 3600  # 1 hour default
 
     async def initialize(self):
         """Initialize the cache and its components."""
@@ -105,10 +110,21 @@ class Semantrix:
                 # Recover any pending operations
                 await self._recover_pending_operations()
         
+        # Start background tombstone cleanup task
+        self._start_tombstone_cleanup_task()
+    
         self._initialized = True
     
     async def shutdown(self):
         """Gracefully shutdown the cache and its components."""
+        # Stop background tasks
+        if self._tombstone_cleanup_task and not self._tombstone_cleanup_task.done():
+            self._tombstone_cleanup_task.cancel()
+            try:
+                await self._tombstone_cleanup_task
+            except asyncio.CancelledError:
+                pass
+        
         await self.cache_store.close()
         await self.vector_store.close()
         if self.wal:
@@ -250,6 +266,35 @@ class Semantrix:
                 # Re-raise the original exception to maintain the test's expected behavior
                 raise
     
+    def _start_tombstone_cleanup_task(self):
+        """Start the background tombstone cleanup task."""
+        if self._tombstone_cleanup_task is None or self._tombstone_cleanup_task.done():
+            self._tombstone_cleanup_task = asyncio.create_task(
+                self._tombstone_cleanup_loop(),
+                name=f"Semantrix-tombstone-cleanup-{id(self)}"
+            )
+            logger.debug("Started background tombstone cleanup task")
+    
+    async def _tombstone_cleanup_loop(self):
+        """Background task that purges tombstones at regular intervals."""
+        while True:
+            try:
+                # Wait for the cleanup interval
+                await asyncio.sleep(self._tombstone_cleanup_interval)
+                
+                # Purge tombstones
+                purged_count = await self.cache_store.purge_tombstones()
+                if purged_count > 0:
+                    logger.info(f"Purged {purged_count} tombstoned items from cache")
+                    
+            except asyncio.CancelledError:
+                logger.debug("Tombstone cleanup task was cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Error in tombstone cleanup task: {e}", exc_info=True)
+                # Don't let errors kill the task, just wait and try again
+                await asyncio.sleep(300)  # Wait 5 minutes before retrying
+    
     @retry(max_retries=3, initial_delay=0.5, backoff_factor=2)
     async def _execute_operation(
         self,
@@ -277,42 +322,50 @@ class Semantrix:
             # Set operation (previously ADD)
             prompt = data['prompt']
             response = data['response']
-            embedding = data.get('embedding')
+            vector_ids = data.get('vector_ids', [])
             
-            if embedding is None:
-                # Generate embedding if not provided
-                embedding = await self.embedder.embed(prompt)
-            
-            # Store in vector store and cache store
-            # Note: This is not atomic!
+            # Store in cache store with vector IDs
             try:
-                await self.vector_store.add(vectors=[embedding], documents=[prompt])
-                await self.cache_store.add(prompt, response)
+                await self.cache_store.add(prompt, response, vector_ids=vector_ids)
                 return {'success': True}
-            except (CacheOperationError, VectorOperationError) as e:
-                # Try to clean up if one operation succeeds and the other fails
-                logger.warning(f"Operation failed, attempting cleanup for prompt: {prompt}")
+            except CacheOperationError as e:
+                # Try to clean up vector store if cache store fails
+                logger.warning(f"Cache store operation failed, attempting cleanup for prompt: {prompt}")
                 try:
-                    await self.vector_store.delete(prompt)
+                    await self.vector_store.delete(documents=[prompt])
                 except VectorOperationError as cleanup_e:
                     logger.error(f"Cleanup failed for vector store: {cleanup_e}")
-                try:
-                    await self.cache_store.delete(prompt)
-                except CacheOperationError as cleanup_e:
-                    logger.error(f"Cleanup failed for cache store: {cleanup_e}")
                 raise OperationError(f"Failed to set prompt '{prompt}'", original_exception=e)
             
         elif operation_type == OperationType.DELETE:
             # Delete operation
             prompt = data['prompt']
+            mode = DeletionMode(data.get('mode', 'direct'))
             
-            # Note: This is not atomic!
             try:
-                await self.vector_store.delete(prompt)
-                await self.cache_store.delete(prompt)
-                return {'success': True}
+                if mode == DeletionMode.TOMBSTONE:
+                    # Mark as tombstoned in both cache and vector stores
+                    cache_success = await self.cache_store.tombstone(prompt)
+                    vector_success = await self.vector_store.tombstone(documents=[prompt])
+                    
+                    # Consider operation successful if at least cache store succeeded
+                    success = cache_success
+                    if not vector_success:
+                        logger.warning(f"Vector store tombstoning failed for prompt '{prompt}'")
+                    
+                    return {'success': success}
+                else:
+                    # DIRECT mode: Immediate deletion from both cache and vector stores
+                    cache_success = await self.cache_store.delete(prompt)
+                    vector_success = await self.vector_store.delete(documents=[prompt])
+                    
+                    # Consider operation successful if at least cache store succeeded
+                    success = cache_success
+                    if not vector_success:
+                        logger.warning(f"Vector store deletion failed for prompt '{prompt}'")
+                    
+                    return {'success': success}
             except Exception as e:
-                # If one operation fails, we can't do much
                 logger.error("Error during delete operation: %s", e)
                 raise OperationError(f"Failed to delete prompt '{prompt}'", original_exception=e)
             
@@ -332,6 +385,11 @@ class Semantrix:
         """
         validate_prompt(prompt)
         validate_operation_id(operation_id)
+        
+        # Check if the item is tombstoned first
+        if await self.cache_store.is_tombstoned(prompt):
+            return None
+            
         # Check if we have an exact match first (fast path)
         if exact_match := await self.cache_store.get(prompt):
             return exact_match
@@ -347,15 +405,20 @@ class Semantrix:
                 return None
                 
             # 2. Semantic search (if vector store is available)
-            if hasattr(self.embedder, 'aencode') and hasattr(self.vector_store, 'search'):
+            if hasattr(self.embedder, 'encode') and hasattr(self.vector_store, 'search'):
                 try:
                     # Use async embedding
-                    embedding = await self.embedder.aencode(prompt)
+                    embedding = await self.embedder.encode(prompt)
                     
                     # Search in vector store
-                    match = await self.vector_store.search(embedding, self.similarity_threshold)
-                    if isinstance(match, str):
-                        return match
+                    results = await self.vector_store.search(embedding, k=3)
+                    
+                    # Check each result to see if it's not tombstoned
+                    for result in results:
+                        if result.document and result.score >= self.similarity_threshold:
+                            # Check if the matched document is not tombstoned
+                            if not await self.cache_store.is_tombstoned(result.document):
+                                return await self.cache_store.get(result.document)
                 except Exception as e:
                     logger.error(f"Error during semantic search: {e}")
                     # Wrap in VectorOperationError and re-raise
@@ -378,16 +441,72 @@ class Semantrix:
 
         return await self._set_with_retry(prompt, response, operation_id)
 
+    async def delete(self, prompt: str, mode: DeletionMode = DeletionMode.DIRECT, operation_id: Optional[str] = None) -> bool:
+        """
+        Delete a prompt from the cache.
+        
+        Args:
+            prompt: The prompt to delete
+            mode: Deletion mode (DIRECT or TOMBSTONE)
+            operation_id: Optional operation ID for idempotency
+            
+        Returns:
+            bool: True if deletion was successful, False otherwise
+        """
+        validate_prompt(prompt)
+        validate_operation_id(operation_id)
+        
+        return await self._delete_with_retry(prompt, mode, operation_id)
+
+
+
+    async def tombstone(self, prompt: str, operation_id: Optional[str] = None) -> bool:
+        """
+        Mark a prompt as deleted (tombstoning) without removing it from storage.
+        
+        Args:
+            prompt: The prompt to tombstone
+            operation_id: Optional operation ID for idempotency
+            
+        Returns:
+            bool: True if the prompt was found and tombstoned, False otherwise
+        """
+        validate_prompt(prompt)
+        validate_operation_id(operation_id)
+        
+        return await self._tombstone_with_retry(prompt, operation_id)
+
+    async def purge_tombstones(self, operation_id: Optional[str] = None) -> int:
+        """
+        Permanently remove all tombstoned prompts from storage.
+        
+        Args:
+            operation_id: Optional operation ID for idempotency
+            
+        Returns:
+            int: Number of tombstoned prompts that were purged
+        """
+        validate_operation_id(operation_id)
+        
+        return await self._purge_tombstones_with_retry(operation_id)
+
     @retry(max_retries=3, initial_delay=0.5, backoff_factor=2)
     async def _set_with_retry(self, prompt: str, response: str, operation_id: Optional[str] = None) -> None:
         # Generate embedding for the prompt
-        embedding = await self.embedder.embed(prompt)
+        embedding = await self.embedder.encode(prompt)
+        
+        # Add to vector store and get vector IDs
+        vector_ids = await self.vector_store.add(
+            vectors=[embedding],
+            documents=[prompt]
+        )
         
         # Prepare operation data for WAL
         operation_data = {
             'prompt': prompt,
             'response': response,
-            'embedding': embedding.tolist() if hasattr(embedding, 'tolist') else embedding
+            'embedding': embedding.tolist() if hasattr(embedding, 'tolist') else embedding,
+            'vector_ids': vector_ids
         }
         
         # Execute with WAL support and return the response
@@ -396,6 +515,52 @@ class Semantrix:
             data=operation_data,
             operation_id=operation_id
         )
+
+    @retry(max_retries=3, initial_delay=0.5, backoff_factor=2)
+    async def _delete_with_retry(self, prompt: str, mode: DeletionMode, operation_id: Optional[str] = None) -> bool:
+        # Prepare operation data for WAL
+        operation_data = {
+            'prompt': prompt,
+            'mode': mode.value
+        }
+        
+        # Execute with WAL support
+        result = await self._execute_with_wal(
+            operation_type=OperationType.DELETE,
+            data=operation_data,
+            operation_id=operation_id
+        )
+        
+        return result.get('success', False) if isinstance(result, dict) else result
+
+    @retry(max_retries=3, initial_delay=0.5, backoff_factor=2)
+    async def _tombstone_with_retry(self, prompt: str, operation_id: Optional[str] = None) -> bool:
+        # Prepare operation data for WAL
+        operation_data = {
+            'prompt': prompt,
+            'mode': DeletionMode.TOMBSTONE.value
+        }
+        
+        # Execute with WAL support
+        result = await self._execute_with_wal(
+            operation_type=OperationType.DELETE,
+            data=operation_data,
+            operation_id=operation_id
+        )
+        
+        return result.get('success', False) if isinstance(result, dict) else result
+
+    @retry(max_retries=3, initial_delay=0.5, backoff_factor=2)
+    async def _purge_tombstones_with_retry(self, operation_id: Optional[str] = None) -> int:
+        # This operation doesn't need WAL since it's a cleanup operation
+        # and doesn't affect the core cache functionality
+        
+        # Purge from both cache and vector stores
+        cache_purged = await self.cache_store.purge_tombstones()
+        vector_purged = await self.vector_store.purge_tombstones()
+        
+        # Return total number of purged items
+        return cache_purged + vector_purged
 
     async def explain(self, prompt: str) -> ExplainResult:
         """
@@ -415,18 +580,20 @@ class Semantrix:
         exact_match_result = await self.cache_store.get(prompt)
         if exact_match_result is not None:
             return create_explain_result(
-                hit=True,
-                reason="Exact match found in cache",
-                matches=[CacheMatch(prompt=prompt, similarity=1.0)],
-                exact_match=True,
-                cache_hit=True,
+                query=prompt,
                 similarity_threshold=self.similarity_threshold,
+                top_matches=[CacheMatch(text=prompt, similarity=1.0)],
+                cache_hit=True,
+                exact_match=True,
+                semantic_match=False,
+                resource_limited=False,
+                resource_warnings=[],
                 total_time_ms=(time.time() - start_time) * 1000
             )
         
         # Generate embedding for semantic search
         embedding_start = time.time()
-        embedding = await self.embedder.embed(prompt)
+        embedding = await self.embedder.encode(prompt)
         embedding_time = (time.time() - embedding_start) * 1000
         
         # Perform semantic search
@@ -442,15 +609,19 @@ class Semantrix:
         
         # Check for semantic matches above threshold
         if matches and matches[0].similarity >= self.similarity_threshold:
+            # Convert vector store results to CacheMatch objects
+            cache_matches = []
+            for match in matches:
+                if match.document:
+                    cache_matches.append(CacheMatch(text=match.document, similarity=match.score))
+            
             return create_explain_result(
-                hit=True,
-                reason=f"Semantic match found (similarity: {matches[0].similarity:.2f})",
-                matches=matches,
+                query=prompt,
+                similarity_threshold=self.similarity_threshold,
+                top_matches=cache_matches,
+                cache_hit=True,
                 exact_match=False,
                 semantic_match=True,
-                cache_hit=False,
-                similarity_threshold=self.similarity_threshold,
-                top_matches=len(matches),
                 resource_limited=bool(resource_warnings),
                 resource_warnings=resource_warnings,
                 embedding_time_ms=embedding_time,
@@ -459,15 +630,20 @@ class Semantrix:
             )
         
         # No matches found
+        # Convert vector store results to CacheMatch objects
+        cache_matches = []
+        if matches:
+            for match in matches:
+                if match.document:
+                    cache_matches.append(CacheMatch(text=match.document, similarity=match.score))
+        
         return create_explain_result(
-            hit=False,
-            reason="No match found above similarity threshold",
-            matches=matches or [],
+            query=prompt,
+            similarity_threshold=self.similarity_threshold,
+            top_matches=cache_matches,
+            cache_hit=False,
             exact_match=False,
             semantic_match=False,
-            cache_hit=False,
-            similarity_threshold=self.similarity_threshold,
-            top_matches=len(matches) if matches else 0,
             resource_limited=bool(resource_warnings),
             resource_warnings=resource_warnings,
             embedding_time_ms=embedding_time,

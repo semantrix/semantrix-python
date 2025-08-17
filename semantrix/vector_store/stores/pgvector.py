@@ -386,6 +386,9 @@ class PgVectorStore(BaseVectorStore):
                     conditions.append("metadata->>%s = %s")
                     params.extend([key, str(value)])
         
+        # Add tombstone filter to exclude tombstoned vectors
+        conditions.append("(metadata->>'tombstoned' IS NULL OR metadata->>'tombstoned' != 'true')")
+        
         # Build the query
         metric_op = "<=>" if self.metric == DistanceMetric.COSINE else "<->"
         where_clause = " AND ".join(conditions) if conditions else "1=1"
@@ -514,6 +517,25 @@ class PgVectorStore(BaseVectorStore):
         self,
         ids: Optional[Union[str, List[str]]] = None,
         filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
+        **kwargs: Any
+    ) -> None:
+        """Delete vectors by IDs, filter, or documents."""
+        if not self._connection:
+            raise VectorOperationError("Database connection not initialized")
+        
+        # Check if any tombstoning-related parameters are passed
+        if any(param is not None for param in [ids, filter, documents]):
+            logger.info(f"Tombstoning requested for PGVector store, using direct deletion")
+            # Fall back to direct deletion for external stores
+        
+        await self._direct_delete(ids=ids, filter=filter, documents=documents, **kwargs)
+    
+    async def _direct_delete(
+        self,
+        ids: Optional[Union[str, List[str]]] = None,
+        filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
         **kwargs: Any
     ) -> None:
         """Delete vectors from the store."""
@@ -601,6 +623,107 @@ class PgVectorStore(BaseVectorStore):
                 self._connection.rollback()
                 self._logger.error(f"Failed to delete vectors from pgvector: {str(e)}")
                 raise VectorOperationError("Failed to delete vectors from pgvector") from e
+    
+    async def tombstone(
+        self,
+        ids: Optional[Union[str, List[str]]] = None,
+        filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
+        **kwargs: Any
+    ) -> bool:
+        """Mark vectors as deleted (tombstoning) without removing them from storage."""
+        if not self._connection:
+            raise VectorOperationError("Database connection not initialized")
+            
+        try:
+            ids_to_tombstone = []
+            
+            # Collect IDs to tombstone
+            if ids is not None:
+                if isinstance(ids, str):
+                    ids_to_tombstone = [ids]
+                else:
+                    ids_to_tombstone = ids
+            elif documents is not None:
+                # Find vectors by document content
+                if isinstance(documents, str):
+                    doc_list = [documents]
+                else:
+                    doc_list = documents
+                
+                for doc in doc_list:
+                    filter_doc = MetadataFilter(field="document", value=doc, operator="eq")
+                    results = await self.get(filter=filter_doc, include_vectors=False)
+                    if results:
+                        ids_to_tombstone.extend([r.id for r in results])
+            elif filter is not None:
+                results = await self.get(filter=filter, include_vectors=False)
+                if results:
+                    ids_to_tombstone.extend([r.id for r in results])
+            
+            if not ids_to_tombstone:
+                return False
+            
+            # Mark as tombstoned by updating metadata
+            with self._connection.cursor() as cur:
+                for vec_id in ids_to_tombstone:
+                    # Update metadata to mark as tombstoned
+                    cur.execute(
+                        sql.SQL("""
+                            UPDATE {} 
+                            SET metadata = jsonb_set(
+                                COALESCE(metadata, '{}'::jsonb),
+                                '{tombstoned}',
+                                'true'::jsonb
+                            ),
+                            metadata = jsonb_set(
+                                metadata,
+                                '{tombstoned_at}',
+                                %s::jsonb
+                            )
+                            WHERE id = %s
+                        """).format(sql.Identifier(self.table_name)),
+                        [str(int(time.time() * 1000)), vec_id]
+                    )
+                
+                self._connection.commit()
+            
+            return True
+            
+        except psycopg2.Error as e:
+            self._connection.rollback()
+            self._logger.error(f"Failed to tombstone vectors in pgvector: {str(e)}")
+            raise VectorOperationError("Failed to tombstone vectors in pgvector") from e
+    
+    async def purge_tombstones(self) -> int:
+        """Permanently remove all tombstoned vectors from storage."""
+        if not self._connection:
+            raise VectorOperationError("Database connection not initialized")
+            
+        try:
+            with self._connection.cursor() as cur:
+                # Count tombstoned vectors before deletion
+                cur.execute(
+                    sql.SQL("SELECT COUNT(*) FROM {} WHERE metadata->>'tombstoned' = 'true'").format(
+                        sql.Identifier(self.table_name)
+                    )
+                )
+                count = cur.fetchone()[0]
+                
+                # Delete tombstoned vectors
+                cur.execute(
+                    sql.SQL("DELETE FROM {} WHERE metadata->>'tombstoned' = 'true'").format(
+                        sql.Identifier(self.table_name)
+                    )
+                )
+                
+                self._connection.commit()
+                return count
+                
+        except psycopg2.Error as e:
+            self._connection.rollback()
+            self._logger.error(f"Failed to purge tombstones from pgvector: {str(e)}")
+            raise VectorOperationError("Failed to purge tombstones from pgvector") from e
     
     async def count(self, **kwargs: Any) -> int:
         """Count the number of vectors in the store."""

@@ -432,6 +432,20 @@ class QdrantVectorStore(BaseVectorStore):
             # Build Qdrant filter if provided
             qdrant_filter = self._build_qdrant_filter(filter) if filter else None
             
+            # Add tombstone filter to exclude tombstoned vectors
+            tombstone_filter = FieldCondition(
+                key="metadata.tombstoned",
+                match=MatchValue(value=False)
+            )
+            
+            if qdrant_filter:
+                # Combine existing filter with tombstone filter
+                qdrant_filter = Filter(
+                    must=[qdrant_filter, tombstone_filter]
+                )
+            else:
+                qdrant_filter = Filter(must=[tombstone_filter])
+            
             # Perform search
             search_results = self._client.search(
                 collection_name=self.collection_name,
@@ -549,6 +563,25 @@ class QdrantVectorStore(BaseVectorStore):
         self,
         ids: Optional[Union[str, List[str]]] = None,
         filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
+        **kwargs: Any
+    ) -> None:
+        """Delete vectors by IDs, filter, or documents."""
+        if self._client is None:
+            raise VectorOperationError("Qdrant client not initialized")
+        
+        # Check if any tombstoning-related parameters are passed
+        if any(param is not None for param in [ids, filter, documents]):
+            logger.info(f"Tombstoning requested for Qdrant store, using direct deletion")
+            # Fall back to direct deletion for external stores
+        
+        await self._direct_delete(ids=ids, filter=filter, documents=documents, **kwargs)
+    
+    async def _direct_delete(
+        self,
+        ids: Optional[Union[str, List[str]]] = None,
+        filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
         **kwargs: Any
     ) -> None:
         """Delete vectors by IDs or filter."""
@@ -576,6 +609,106 @@ class QdrantVectorStore(BaseVectorStore):
         except Exception as e:
             self._logger.error(f"Failed to delete vectors from Qdrant: {str(e)}")
             raise VectorOperationError("Failed to delete vectors from Qdrant") from e
+    
+    async def tombstone(
+        self,
+        ids: Optional[Union[str, List[str]]] = None,
+        filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
+        **kwargs: Any
+    ) -> bool:
+        """Mark vectors as deleted (tombstoning) without removing them from storage."""
+        if self._client is None:
+            raise VectorOperationError("Qdrant client not initialized")
+            
+        try:
+            ids_to_tombstone = []
+            
+            # Collect IDs to tombstone
+            if ids is not None:
+                if isinstance(ids, str):
+                    ids_to_tombstone = [ids]
+                else:
+                    ids_to_tombstone = ids
+            elif documents is not None:
+                # Find vectors by document content
+                if isinstance(documents, str):
+                    doc_list = [documents]
+                else:
+                    doc_list = documents
+                
+                for doc in doc_list:
+                    filter_doc = MetadataFilter(field="document", value=doc, operator="eq")
+                    results = await self.get(filter=filter_doc, include_vectors=False)
+                    if results:
+                        ids_to_tombstone.extend([r.id for r in results])
+            elif filter is not None:
+                results = await self.get(filter=filter, include_vectors=False)
+                if results:
+                    ids_to_tombstone.extend([r.id for r in results])
+            
+            if not ids_to_tombstone:
+                return False
+            
+            # Mark as tombstoned by updating metadata
+            for vec_id in ids_to_tombstone:
+                try:
+                    # Get existing record
+                    existing = await self.get(ids=[vec_id], include_vectors=True)
+                    if not existing:
+                        continue
+                    
+                    record = existing[0]
+                    metadata = dict(record.metadata or {})
+                    metadata["tombstoned"] = True
+                    metadata["tombstoned_at"] = int(time.time() * 1000)
+                    
+                    # Update the record
+                    point = PointStruct(
+                        id=vec_id,
+                        vector=record.embedding,
+                        payload=metadata
+                    )
+                    
+                    self._client.upsert(
+                        collection_name=self.collection_name,
+                        points=[point]
+                    )
+                except Exception as e:
+                    self._logger.warning(f"Failed to tombstone vector {vec_id}: {e}")
+                    continue
+            
+            return True
+            
+        except Exception as e:
+            self._logger.error(f"Failed to tombstone vectors in Qdrant: {str(e)}")
+            raise VectorOperationError("Failed to tombstone vectors in Qdrant") from e
+    
+    async def purge_tombstones(self) -> int:
+        """Permanently remove all tombstoned vectors from storage."""
+        if self._client is None:
+            raise VectorOperationError("Qdrant client not initialized")
+            
+        try:
+            # Find all tombstoned vectors
+            filter_tombstone = MetadataFilter(field="tombstoned", value=True, operator="eq")
+            results = await self.get(filter=filter_tombstone, include_vectors=False)
+            
+            if not results:
+                return 0
+            
+            # Delete tombstoned vectors
+            ids_to_delete = [r.id for r in results]
+            self._client.delete(
+                collection_name=self.collection_name,
+                points_selector=ids_to_delete
+            )
+            
+            return len(ids_to_delete)
+            
+        except Exception as e:
+            self._logger.error(f"Failed to purge tombstones from Qdrant: {str(e)}")
+            raise VectorOperationError("Failed to purge tombstones from Qdrant") from e
     
     async def count(self, **kwargs: Any) -> int:
         """Get the number of vectors in the store."""

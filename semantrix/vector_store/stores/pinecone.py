@@ -270,10 +270,22 @@ class PineconeVectorStore(BaseVectorStore):
         try:
             query_vector_list = query_vector.tolist() if hasattr(query_vector, 'tolist') else list(query_vector)
             
+            # Add tombstone filter to exclude tombstoned vectors
+            if filter:
+                # Combine existing filter with tombstone filter
+                combined_filter = {
+                    "$and": [
+                        filter,
+                        {"tombstoned": {"$ne": True}}
+                    ]
+                }
+            else:
+                combined_filter = {"tombstoned": {"$ne": True}}
+            
             response = self._index.query(
                 vector=query_vector_list,
                 top_k=k,
-                filter=filter,
+                filter=combined_filter,
                 include_metadata=include_metadata,
                 include_values=include_vectors,
                 namespace=self.namespace
@@ -373,6 +385,25 @@ class PineconeVectorStore(BaseVectorStore):
         self,
         ids: Optional[Union[str, List[str]]] = None,
         filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
+        **kwargs: Any
+    ) -> None:
+        """Delete vectors by IDs, filter, or documents."""
+        if self._index is None:
+            raise VectorOperationError("Pinecone index not initialized")
+        
+        # Check if any tombstoning-related parameters are passed
+        if any(param is not None for param in [ids, filter, documents]):
+            logger.info(f"Tombstoning requested for Pinecone store, using direct deletion")
+            # Fall back to direct deletion for external stores
+        
+        await self._direct_delete(ids=ids, filter=filter, documents=documents, **kwargs)
+    
+    async def _direct_delete(
+        self,
+        ids: Optional[Union[str, List[str]]] = None,
+        filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
         **kwargs: Any
     ) -> None:
         """Delete vectors by IDs or filter."""
@@ -392,6 +423,101 @@ class PineconeVectorStore(BaseVectorStore):
         except Exception as e:
             self._logger.error(f"Failed to delete vectors from Pinecone: {str(e)}")
             raise VectorOperationError("Failed to delete vectors from Pinecone") from e
+    
+    async def tombstone(
+        self,
+        ids: Optional[Union[str, List[str]]] = None,
+        filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
+        **kwargs: Any
+    ) -> bool:
+        """Mark vectors as deleted (tombstoning) without removing them from storage."""
+        if self._index is None:
+            raise VectorOperationError("Pinecone index not initialized")
+            
+        try:
+            ids_to_tombstone = []
+            
+            # Collect IDs to tombstone
+            if ids is not None:
+                if isinstance(ids, str):
+                    ids_to_tombstone = [ids]
+                else:
+                    ids_to_tombstone = ids
+            elif documents is not None:
+                # Find vectors by document content
+                if isinstance(documents, str):
+                    doc_list = [documents]
+                else:
+                    doc_list = documents
+                
+                for doc in doc_list:
+                    filter_doc = MetadataFilter(field="document", value=doc, operator="eq")
+                    results = await self.get(filter=filter_doc, include_vectors=False)
+                    if results:
+                        ids_to_tombstone.extend([r.id for r in results])
+            elif filter is not None:
+                results = await self.get(filter=filter, include_vectors=False)
+                if results:
+                    ids_to_tombstone.extend([r.id for r in results])
+            
+            if not ids_to_tombstone:
+                return False
+            
+            # Mark as tombstoned by updating metadata
+            for vec_id in ids_to_tombstone:
+                try:
+                    # Get existing record
+                    existing = await self.get(ids=[vec_id], include_vectors=True)
+                    if not existing:
+                        continue
+                    
+                    record = existing[0]
+                    metadata = dict(record.metadata or {})
+                    metadata["tombstoned"] = True
+                    metadata["tombstoned_at"] = int(time.time() * 1000)
+                    
+                    # Update the record
+                    self._index.upsert(
+                        vectors=[(
+                            str(vec_id),
+                            record.embedding,
+                            metadata
+                        )],
+                        namespace=self.namespace
+                    )
+                except Exception as e:
+                    self._logger.warning(f"Failed to tombstone vector {vec_id}: {e}")
+                    continue
+            
+            return True
+            
+        except Exception as e:
+            self._logger.error(f"Failed to tombstone vectors in Pinecone: {str(e)}")
+            raise VectorOperationError("Failed to tombstone vectors in Pinecone") from e
+    
+    async def purge_tombstones(self) -> int:
+        """Permanently remove all tombstoned vectors from storage."""
+        if self._index is None:
+            raise VectorOperationError("Pinecone index not initialized")
+            
+        try:
+            # Find all tombstoned vectors
+            filter_tombstone = MetadataFilter(field="tombstoned", value=True, operator="eq")
+            results = await self.get(filter=filter_tombstone, include_vectors=False)
+            
+            if not results:
+                return 0
+            
+            # Delete tombstoned vectors
+            ids_to_delete = [r.id for r in results]
+            self._index.delete(ids=ids_to_delete, namespace=self.namespace)
+            
+            return len(ids_to_delete)
+            
+        except Exception as e:
+            self._logger.error(f"Failed to purge tombstones from Pinecone: {str(e)}")
+            raise VectorOperationError("Failed to purge tombstones from Pinecone") from e
     
     async def count(self, **kwargs: Any) -> int:
         """Get the number of vectors in the store."""

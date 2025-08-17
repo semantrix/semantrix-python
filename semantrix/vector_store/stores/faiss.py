@@ -615,6 +615,11 @@ class FAISSVectorStore(BaseVectorStore):
                 record = self._id_to_record.get(string_id)
                 
                 if record is not None:
+                    # Skip tombstoned vectors
+                    if (record.metadata and 
+                        record.metadata.get('tombstoned', False)):
+                        continue
+                    
                     result = QueryResult(
                         id=string_id,
                         score=self._denormalize_score(distance),
@@ -765,6 +770,7 @@ class FAISSVectorStore(BaseVectorStore):
         self,
         ids: Optional[Union[str, List[str]]] = None,
         filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
         **kwargs: Any
     ) -> None:
         """
@@ -773,16 +779,23 @@ class FAISSVectorStore(BaseVectorStore):
         Args:
             ids: Single ID or list of IDs to delete
             filter: Optional metadata filter to select vectors to delete
+            documents: Single document text or list of document texts to delete
             **kwargs: Additional implementation-specific parameters
             
         Raises:
-            ValueError: If neither ids nor filter is provided, or if IDs don't exist
+            ValueError: If neither ids, filter, nor documents is provided, or if IDs don't exist
         """
-        if ids is not None and filter is not None:
-            raise VectorOperationError("Cannot specify both ids and filter")
-            
-        if ids is None and filter is None:
-            raise VectorOperationError("Must provide either ids or filter")
+        # Validate that only one deletion method is specified
+        specified_methods = sum([
+            ids is not None,
+            filter is not None,
+            documents is not None
+        ])
+        
+        if specified_methods == 0:
+            raise VectorOperationError("Must provide either ids, filter, or documents")
+        elif specified_methods > 1:
+            raise VectorOperationError("Cannot specify multiple deletion methods (ids, filter, documents)")
             
         # Convert to list of IDs
         ids_to_delete: List[str] = []
@@ -802,6 +815,16 @@ class FAISSVectorStore(BaseVectorStore):
             # Get IDs from filter
             filtered_records = await self._run_in_executor(self._filter_records, filter)
             ids_to_delete = [r.id for r in filtered_records]
+            
+        elif documents is not None:
+            # Find IDs by document text
+            if isinstance(documents, str):
+                documents = [documents]
+            
+            for doc in documents:
+                for record_id, record in self._id_to_record.items():
+                    if record.document == doc:
+                        ids_to_delete.append(record_id)
             
         if not ids_to_delete:
             return
@@ -832,6 +855,112 @@ class FAISSVectorStore(BaseVectorStore):
             # Save to disk if configured
             if self.persist_path:
                 await self._run_in_executor(self._save_to_disk)
+    
+                # Save to disk if configured
+            if self.persist_path:
+                await self._run_in_executor(self._save_to_disk)
+
+    async def tombstone(
+        self,
+        ids: Optional[Union[str, List[str]]] = None,
+        filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
+        **kwargs: Any
+    ) -> bool:
+        """
+        Mark vectors as tombstoned (deleted) without immediately removing them.
+        
+        Args:
+            ids: Single ID or list of IDs to tombstone
+            filter: Optional metadata filter for bulk tombstoning
+            documents: Document text(s) to tombstone
+            **kwargs: Additional implementation-specific parameters
+            
+        Returns:
+            True if tombstoning was successful
+        """
+        # Validate that only one tombstoning method is specified
+        specified_methods = sum([
+            ids is not None,
+            filter is not None,
+            documents is not None
+        ])
+        
+        if specified_methods == 0:
+            return False
+        elif specified_methods > 1:
+            return False
+            
+        # Convert to list of IDs
+        ids_to_tombstone: List[str] = []
+        
+        if ids is not None:
+            if isinstance(ids, str):
+                ids_to_tombstone = [ids]
+            else:
+                ids_to_tombstone = ids.copy()
+                
+        elif filter is not None:
+            # Get IDs from filter
+            filtered_records = await self._run_in_executor(self._filter_records, filter)
+            ids_to_tombstone = [r.id for r in filtered_records]
+            
+        elif documents is not None:
+            # Find IDs by document text
+            if isinstance(documents, str):
+                documents = [documents]
+            
+            for doc in documents:
+                for record_id, record in self._id_to_record.items():
+                    if record.document == doc:
+                        ids_to_tombstone.append(record_id)
+        
+        if not ids_to_tombstone:
+            return False
+            
+        # Mark as tombstoned
+        async with self._lock:
+            for id in ids_to_tombstone:
+                if id in self._id_to_record:
+                    record = self._id_to_record[id]
+                    # Add tombstone flag to metadata
+                    if record.metadata is None:
+                        record.metadata = {}
+                    record.metadata['tombstoned'] = True
+                    record.metadata['tombstoned_at'] = datetime.now().isoformat()
+            
+            # Save to disk if configured
+            if self.persist_path:
+                await self._run_in_executor(self._save_to_disk)
+        
+        return True
+    
+    async def purge_tombstones(self) -> int:
+        """
+        Permanently remove all tombstoned vectors from storage.
+        
+        Returns:
+            int: Number of tombstoned vectors that were purged
+        """
+        try:
+            async with self._lock:
+                # Find all tombstoned records
+                tombstoned_ids = []
+                for record_id, record in self._id_to_record.items():
+                    if (record.metadata and 
+                        record.metadata.get('tombstoned', False)):
+                        tombstoned_ids.append(record_id)
+                
+                if not tombstoned_ids:
+                    return 0
+                
+                # Delete them permanently using the existing delete method
+                await self.delete(ids=tombstoned_ids)
+                return len(tombstoned_ids)
+                
+        except Exception as e:
+            self._logger.error(f"Error purging tombstones: {e}")
+            return 0
     
     async def count(self, filter: Optional[MetadataFilter] = None) -> int:
         """
@@ -936,6 +1065,39 @@ class FAISSVectorStore(BaseVectorStore):
     async def size(self) -> int:
         """Get the number of stored embeddings."""
         return len(self._id_to_record)
+    
+    async def list_collections(self) -> List[str]:
+        """
+        List all collections.
+        
+        Note: FAISS doesn't have a native concept of collections, so this returns
+        a list with the current namespace if one is set, or an empty list.
+        
+        Returns:
+            List of collection names
+        """
+        if self.namespace:
+            return [self.namespace]
+        return []
+    
+    async def delete_collection(self, name: str, **kwargs: Any) -> bool:
+        """
+        Delete a collection.
+        
+        Note: FAISS doesn't have a native concept of collections. This method
+        will clear the entire store if the name matches the current namespace.
+        
+        Args:
+            name: Name of the collection to delete
+            **kwargs: Additional arguments (ignored)
+            
+        Returns:
+            True if the collection was deleted, False otherwise
+        """
+        if name == self.namespace or (not self.namespace and not name):
+            await self.clear()
+            return True
+        return False
         
     async def __aenter__(self):
         """Async context manager entry."""

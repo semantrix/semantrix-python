@@ -14,7 +14,7 @@ import asyncpg
 from asyncpg import Connection, Pool, create_pool
 from asyncpg.pool import PoolAcquireContext
 
-from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy
+from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy, DeletionMode
 from semantrix.exceptions import CacheOperationError
 
 # Configure logging
@@ -122,6 +122,8 @@ class PostgreSQLCacheStore(BaseCacheStore):
                     last_accessed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
                     access_count INTEGER NOT NULL DEFAULT 1,
                     metadata JSONB,
+                    tombstoned BOOLEAN NOT NULL DEFAULT FALSE,
+                    tombstoned_at TIMESTAMP WITH TIME ZONE,
                     
                     -- Indexes
                     CONSTRAINT {self.table_name}_key_unique UNIQUE (key)
@@ -182,7 +184,8 @@ class PostgreSQLCacheStore(BaseCacheStore):
                         access_count = access_count + 1
                     WHERE 
                         key = $1 AND 
-                        (expires_at IS NULL OR expires_at > NOW() AT TIME ZONE 'UTC')
+                        (expires_at IS NULL OR expires_at > NOW() AT TIME ZONE 'UTC') AND
+                        tombstoned = FALSE
                     RETURNING value
                     """,
                     prompt
@@ -232,16 +235,27 @@ class PostgreSQLCacheStore(BaseCacheStore):
             logger.error(f"Error adding item to PostgreSQL cache: {e}")
             raise CacheOperationError(f"Failed to add item to PostgreSQL for key: {prompt}", original_exception=e) from e
             
-    async def delete(self, key: str) -> bool:
+    async def delete(self, key: str, mode: DeletionMode = DeletionMode.DIRECT) -> bool:
         """
         Delete a key from the PostgreSQL cache.
         
         Args:
             key: The key to delete
+            mode: Deletion mode (DIRECT or TOMBSTONE)
             
         Returns:
             bool: True if the key was found and deleted, False otherwise
         """
+        if mode == DeletionMode.TOMBSTONE:
+            logger.info(f"Tombstoning requested for PostgreSQL store, using direct deletion for key: {key}")
+            # Fall back to direct deletion for external stores
+            return await self._direct_delete(key)
+        
+        return await self._direct_delete(key)
+    
+    async def _direct_delete(self, key: str) -> bool:
+        """Direct deletion implementation."""
+        
         try:
             await self._ensure_connected()
             if not self._pool:
@@ -263,6 +277,109 @@ class PostgreSQLCacheStore(BaseCacheStore):
         except asyncpg.PostgresError as e:
             logger.error(f"Error deleting key from PostgreSQL cache: {e}")
             raise CacheOperationError(f"Failed to delete key from PostgreSQL: {key}", original_exception=e) from e
+    
+    async def tombstone(self, key: str) -> bool:
+        """
+        Mark a key as deleted (tombstoning) without removing it from storage.
+        
+        Args:
+            key: The key to tombstone
+            
+        Returns:
+            bool: True if the key was found and tombstoned, False otherwise
+        """
+        try:
+            await self._ensure_connected()
+            if not self._pool:
+                return False
+                
+            async with self._pool.acquire() as conn:
+                result = await conn.execute(
+                    f"""
+                    UPDATE {self.table_name}
+                    SET 
+                        tombstoned = TRUE,
+                        tombstoned_at = NOW() AT TIME ZONE 'UTC'
+                    WHERE key = $1
+                    RETURNING key
+                    """,
+                    key
+                )
+                
+                # If rows were affected, the key existed and was tombstoned
+                return result.split()[-1] == '1'  # Returns 'UPDATE 1' if successful
+                
+        except asyncpg.PostgresError as e:
+            logger.error(f"Error tombstoning key in PostgreSQL cache: {e}")
+            raise CacheOperationError(f"Failed to tombstone key in PostgreSQL: {key}", original_exception=e) from e
+    
+    async def is_tombstoned(self, key: str) -> bool:
+        """
+        Check if a key is tombstoned.
+        
+        Args:
+            key: The key to check
+            
+        Returns:
+            bool: True if the key is tombstoned, False otherwise
+        """
+        try:
+            await self._ensure_connected()
+            if not self._pool:
+                return False
+                
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    f"""
+                    SELECT tombstoned 
+                    FROM {self.table_name}
+                    WHERE key = $1
+                    """,
+                    key
+                )
+                
+                return row['tombstoned'] if row else False
+                
+        except asyncpg.PostgresError as e:
+            logger.error(f"Error checking tombstone status in PostgreSQL cache: {e}")
+            return False
+    
+    async def purge_tombstones(self) -> int:
+        """
+        Permanently remove all tombstoned keys from storage.
+        
+        Returns:
+            int: Number of tombstoned keys that were purged
+        """
+        try:
+            await self._ensure_connected()
+            if not self._pool:
+                return 0
+                
+            async with self._pool.acquire() as conn:
+                # Count tombstoned items before deletion
+                count_row = await conn.fetchrow(
+                    f"""
+                    SELECT COUNT(*) as count
+                    FROM {self.table_name}
+                    WHERE tombstoned = TRUE
+                    """
+                )
+                count = count_row['count'] if count_row else 0
+                
+                # Delete tombstoned items
+                await conn.execute(
+                    f"""
+                    DELETE FROM {self.table_name}
+                    WHERE tombstoned = TRUE
+                    """
+                )
+                
+                return count
+                
+        except asyncpg.PostgresError as e:
+            logger.error(f"Error purging tombstones from PostgreSQL cache: {e}")
+            raise CacheOperationError("Failed to purge tombstones from PostgreSQL", original_exception=e) from e
 
     async def clear(self) -> None:
         """Clear all items from the cache."""

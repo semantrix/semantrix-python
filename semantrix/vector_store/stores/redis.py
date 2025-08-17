@@ -407,6 +407,9 @@ class RedisVectorStore(BaseVectorStore):
                     query_parts.append(filter_query)
                 query_params.update(filter_params)
             
+            # Add tombstone filter to exclude tombstoned vectors
+            query_parts.append("@tombstoned:{-true}")
+            
             # Build final query
             query_str = " ".join(query_parts)
             query = (
@@ -515,6 +518,25 @@ class RedisVectorStore(BaseVectorStore):
         self,
         ids: Optional[Union[str, List[str]]] = None,
         filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
+        **kwargs: Any
+    ) -> None:
+        """Delete vectors by IDs, filter, or documents."""
+        if self._client is None:
+            raise VectorOperationError("Redis client not initialized")
+        
+        # Check if any tombstoning-related parameters are passed
+        if any(param is not None for param in [ids, filter, documents]):
+            logger.info(f"Tombstoning requested for Redis Vector store, using direct deletion")
+            # Fall back to direct deletion for external stores
+        
+        await self._direct_delete(ids=ids, filter=filter, documents=documents, **kwargs)
+    
+    async def _direct_delete(
+        self,
+        ids: Optional[Union[str, List[str]]] = None,
+        filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
         **kwargs: Any
     ) -> None:
         """Delete vectors by IDs or filter."""
@@ -544,6 +566,82 @@ class RedisVectorStore(BaseVectorStore):
         except redis.exceptions.RedisError as e:
             self._logger.error(f"Failed to delete vectors from Redis: {str(e)}")
             raise VectorOperationError("Failed to delete vectors from Redis") from e
+    
+    async def tombstone(
+        self,
+        ids: Optional[Union[str, List[str]]] = None,
+        filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
+        **kwargs: Any
+    ) -> bool:
+        """Mark vectors as deleted (tombstoning) without removing them from storage."""
+        try:
+            ids_to_tombstone = []
+            
+            # Collect IDs to tombstone
+            if ids is not None:
+                if isinstance(ids, str):
+                    ids_to_tombstone = [ids]
+                else:
+                    ids_to_tombstone = ids
+            elif documents is not None:
+                # Find vectors by document content
+                if isinstance(documents, str):
+                    doc_list = [documents]
+                else:
+                    doc_list = documents
+                
+                for doc in doc_list:
+                    query = Query(f"@document:{{{doc}}}").no_content().dialect(2)
+                    results = self._client.ft(self.index_name).search(query)
+                    if results.docs:
+                        ids_to_tombstone.extend([doc.id for doc in results.docs])
+            elif filter is not None:
+                # Build and execute query to find matching documents
+                query_str, query_params = self._build_redis_query(filter)
+                query = Query(query_str).no_content().dialect(2)
+                results = self._client.ft(self.index_name).search(query, query_params=query_params)
+                if results.docs:
+                    ids_to_tombstone.extend([doc.id for doc in results.docs])
+            
+            if not ids_to_tombstone:
+                return False
+            
+            # Mark as tombstoned by updating metadata
+            pipe = self._client.pipeline()
+            for vec_id in ids_to_tombstone:
+                key = self._get_key(vec_id)
+                doc = self._client.json().get(key) or {}
+                doc["tombstoned"] = True
+                doc["tombstoned_at"] = int(time.time() * 1000)
+                pipe.json().set(key, "$", doc)
+            
+            pipe.execute()
+            return True
+            
+        except redis.exceptions.RedisError as e:
+            self._logger.error(f"Failed to tombstone vectors in Redis: {str(e)}")
+            raise VectorOperationError("Failed to tombstone vectors in Redis") from e
+    
+    async def purge_tombstones(self) -> int:
+        """Permanently remove all tombstoned vectors from storage."""
+        try:
+            # Find all tombstoned vectors
+            query = Query("@tombstoned:{true}").no_content().dialect(2)
+            results = self._client.ft(self.index_name).search(query)
+            
+            if not results.docs:
+                return 0
+            
+            # Delete tombstoned vectors
+            keys = [doc.id for doc in results.docs]
+            self._client.delete(*keys)
+            
+            return len(keys)
+            
+        except redis.exceptions.RedisError as e:
+            self._logger.error(f"Failed to purge tombstones from Redis: {str(e)}")
+            raise VectorOperationError("Failed to purge tombstones from Redis") from e
     
     async def count(self, **kwargs: Any) -> int:
         """Get the number of vectors in the store."""

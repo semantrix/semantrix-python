@@ -339,6 +339,14 @@ class ChromaVectorStore(BaseVectorStore):
                 if filter:
                     where = self._convert_filter(filter)
                 
+                # Add tombstone filter to exclude tombstoned vectors
+                tombstone_filter = {"tombstoned": {"$ne": True}}
+                if where:
+                    # Combine existing filter with tombstone filter
+                    where = {"$and": [where, tombstone_filter]}
+                else:
+                    where = tombstone_filter
+                
                 # Perform search
                 results = self._collection.query(
                     query_embeddings=[query_vector],
@@ -445,6 +453,25 @@ class ChromaVectorStore(BaseVectorStore):
         self,
         ids: Optional[Union[str, List[str]]] = None,
         filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
+        **kwargs: Any
+    ) -> None:
+        """Delete vectors by IDs, filter, or documents."""
+        if self._collection is None:
+            raise VectorOperationError("Chroma collection not initialized")
+        
+        # Check if any tombstoning-related parameters are passed
+        if any(param is not None for param in [ids, filter, documents]):
+            logger.info(f"Tombstoning requested for Chroma store, using direct deletion")
+            # Fall back to direct deletion for external stores
+        
+        await self._direct_delete(ids=ids, filter=filter, documents=documents, **kwargs)
+    
+    async def _direct_delete(
+        self,
+        ids: Optional[Union[str, List[str]]] = None,
+        filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
         **kwargs: Any
     ) -> None:
         def _delete_from_chroma():
@@ -478,6 +505,133 @@ class ChromaVectorStore(BaseVectorStore):
         except Exception as e:
             self._logger.error(f"Error deleting vectors from ChromaDB: {e}")
             raise VectorOperationError("Failed to delete vectors from ChromaDB") from e
+    
+    async def tombstone(
+        self,
+        ids: Optional[Union[str, List[str]]] = None,
+        filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
+        **kwargs: Any
+    ) -> bool:
+        """Mark vectors as deleted (tombstoning) without removing them from storage."""
+        def _tombstone_in_chroma():
+            if self._collection is None:
+                return False
+                
+            ids_to_tombstone = []
+            
+            # Collect IDs to tombstone
+            if ids is not None:
+                if isinstance(ids, str):
+                    ids_to_tombstone = [ids]
+                else:
+                    ids_to_tombstone = ids
+            elif documents is not None:
+                # Find vectors by document content
+                if isinstance(documents, str):
+                    doc_list = [documents]
+                else:
+                    doc_list = documents
+                
+                for doc in doc_list:
+                    results = self._collection.get(
+                        where={"document": doc},
+                        include=[],
+                        limit=10000
+                    )
+                    if (results is not None and 
+                        isinstance(results, dict) and
+                        "ids" in results and 
+                        results["ids"] is not None and 
+                        isinstance(results["ids"], list)):
+                        ids_to_tombstone.extend(results["ids"])
+            elif filter is not None:
+                chroma_filter = self._convert_filter(filter)
+                results = self._collection.get(
+                    where=chroma_filter,
+                    include=[],
+                    limit=10000
+                )
+                if (results is not None and 
+                    isinstance(results, dict) and
+                    "ids" in results and 
+                    results["ids"] is not None and 
+                    isinstance(results["ids"], list)):
+                    ids_to_tombstone.extend(results["ids"])
+            
+            if not ids_to_tombstone:
+                return False
+            
+            # Mark as tombstoned by updating metadata
+            for vector_id in ids_to_tombstone:
+                try:
+                    # Get current metadata
+                    result = self._collection.get(
+                        ids=[vector_id],
+                        include=["metadatas"]
+                    )
+                    if (result and 
+                        "metadatas" in result and 
+                        result["metadatas"] and 
+                        len(result["metadatas"]) > 0):
+                        
+                        metadata = result["metadatas"][0] or {}
+                        metadata["tombstoned"] = True
+                        metadata["tombstoned_at"] = str(uuid.uuid4())  # Use UUID as timestamp
+                        
+                        # Update the vector with tombstone metadata
+                        self._collection.update(
+                            ids=[vector_id],
+                            metadatas=[metadata]
+                        )
+                except Exception as e:
+                    self._logger.warning(f"Failed to tombstone vector {vector_id}: {e}")
+                    continue
+            
+            return True
+        
+        try:
+            return await asyncio.get_event_loop().run_in_executor(None, _tombstone_in_chroma)
+        except Exception as e:
+            self._logger.error(f"Error tombstoning vectors in ChromaDB: {e}")
+            raise VectorOperationError("Failed to tombstone vectors in ChromaDB") from e
+    
+    async def purge_tombstones(self) -> int:
+        """Permanently remove all tombstoned vectors from storage."""
+        def _purge_tombstones_from_chroma():
+            if self._collection is None:
+                return 0
+                
+            try:
+                # Find all tombstoned vectors
+                results = self._collection.get(
+                    where={"tombstoned": True},
+                    include=[],
+                    limit=10000
+                )
+                
+                if (results is not None and 
+                    isinstance(results, dict) and
+                    "ids" in results and 
+                    results["ids"] is not None and 
+                    isinstance(results["ids"], list) and
+                    len(results["ids"]) > 0):
+                    
+                    # Delete tombstoned vectors
+                    self._collection.delete(ids=results["ids"])
+                    return len(results["ids"])
+                
+                return 0
+                
+            except Exception as e:
+                self._logger.error(f"Error purging tombstones from ChromaDB: {e}")
+                return 0
+        
+        try:
+            return await asyncio.get_event_loop().run_in_executor(None, _purge_tombstones_from_chroma)
+        except Exception as e:
+            self._logger.error(f"Error purging tombstones from ChromaDB: {e}")
+            raise VectorOperationError("Failed to purge tombstones from ChromaDB") from e
     
     async def create_index(
         self,

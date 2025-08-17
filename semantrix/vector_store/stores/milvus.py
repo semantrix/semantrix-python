@@ -443,6 +443,9 @@ class MilvusVectorStore(BaseVectorStore):
                     # Default to equality check
                     expr_parts.append(f"json_contains_any({self.METADATA_FIELD}['{key}'], ['{value}'])")
         
+        # Add tombstone filter to exclude tombstoned vectors
+        expr_parts.append(f"not json_contains_any({self.METADATA_FIELD}['tombstoned'], ['true'])")
+        
         # Combine all conditions
         expr = " and ".join(expr_parts) if expr_parts else ""
         
@@ -559,6 +562,25 @@ class MilvusVectorStore(BaseVectorStore):
         self,
         ids: Optional[Union[str, List[str]]] = None,
         filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
+        **kwargs: Any
+    ) -> None:
+        """Delete vectors by IDs, filter, or documents."""
+        if not self._collection:
+            raise VectorOperationError("Collection not initialized")
+        
+        # Check if any tombstoning-related parameters are passed
+        if any(param is not None for param in [ids, filter, documents]):
+            logger.info(f"Tombstoning requested for Milvus store, using direct deletion")
+            # Fall back to direct deletion for external stores
+        
+        await self._direct_delete(ids=ids, filter=filter, documents=documents, **kwargs)
+    
+    async def _direct_delete(
+        self,
+        ids: Optional[Union[str, List[str]]] = None,
+        filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
         **kwargs: Any
     ) -> None:
         """Delete vectors from the store."""
@@ -627,6 +649,105 @@ class MilvusVectorStore(BaseVectorStore):
             except MilvusException as e:
                 self._logger.error(f"Failed to delete vectors from Milvus: {str(e)}")
                 raise VectorOperationError("Failed to delete vectors from Milvus") from e
+    
+    async def tombstone(
+        self,
+        ids: Optional[Union[str, List[str]]] = None,
+        filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
+        **kwargs: Any
+    ) -> bool:
+        """Mark vectors as deleted (tombstoning) without removing them from storage."""
+        if not self._collection:
+            raise VectorOperationError("Collection not initialized")
+            
+        try:
+            ids_to_tombstone = []
+            
+            # Collect IDs to tombstone
+            if ids is not None:
+                if isinstance(ids, str):
+                    ids_to_tombstone = [ids]
+                else:
+                    ids_to_tombstone = ids
+            elif documents is not None:
+                # Find vectors by document content
+                if isinstance(documents, str):
+                    doc_list = [documents]
+                else:
+                    doc_list = documents
+                
+                for doc in doc_list:
+                    filter_doc = MetadataFilter(field="document", value=doc, operator="eq")
+                    results = await self.get(filter=filter_doc, include_vectors=False)
+                    if results:
+                        ids_to_tombstone.extend([r.id for r in results])
+            elif filter is not None:
+                results = await self.get(filter=filter, include_vectors=False)
+                if results:
+                    ids_to_tombstone.extend([r.id for r in results])
+            
+            if not ids_to_tombstone:
+                return False
+            
+            # Mark as tombstoned by updating metadata
+            for vec_id in ids_to_tombstone:
+                try:
+                    # Get existing record
+                    existing = await self.get(ids=[vec_id], include_vectors=True)
+                    if not existing:
+                        continue
+                    
+                    record = existing[0]
+                    metadata = dict(record.metadata or {})
+                    metadata["tombstoned"] = True
+                    metadata["tombstoned_at"] = int(time.time() * 1000)
+                    
+                    # Update the record
+                    self._collection.upsert(
+                        data=[
+                            [vec_id],  # ID
+                            [record.embedding],  # Vector
+                            [record.document or ""],  # Document
+                            [json.dumps(metadata)]  # Metadata
+                        ]
+                    )
+                except MilvusException as e:
+                    self._logger.warning(f"Failed to tombstone vector {vec_id}: {e}")
+                    continue
+            
+            return True
+            
+        except MilvusException as e:
+            self._logger.error(f"Failed to tombstone vectors in Milvus: {str(e)}")
+            raise VectorOperationError("Failed to tombstone vectors in Milvus") from e
+    
+    async def purge_tombstones(self) -> int:
+        """Permanently remove all tombstoned vectors from storage."""
+        if not self._collection:
+            raise VectorOperationError("Collection not initialized")
+            
+        try:
+            # Find all tombstoned vectors
+            filter_tombstone = MetadataFilter(field="tombstoned", value=True, operator="eq")
+            results = await self.get(filter=filter_tombstone, include_vectors=False)
+            
+            if not results:
+                return 0
+            
+            # Delete tombstoned vectors
+            ids_to_delete = [r.id for r in results]
+            id_list = ", ".join([f"'{id_}'" for id_ in ids_to_delete])
+            expr = f"{self.ID_FIELD} in [{id_list}]"
+            
+            self._collection.delete(expr)
+            self._collection.flush()
+            
+            return len(ids_to_delete)
+            
+        except MilvusException as e:
+            self._logger.error(f"Failed to purge tombstones from Milvus: {str(e)}")
+            raise VectorOperationError("Failed to purge tombstones from Milvus") from e
     
     async def count(self, **kwargs: Any) -> int:
         """Count the number of vectors in the store."""

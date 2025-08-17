@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, cast
 
-from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy
+from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy, DeletionMode
 from semantrix.exceptions import CacheOperationError
 
 # Configure logging
@@ -95,7 +95,9 @@ class SQLiteCacheStore(BaseCacheStore):
             expires_at REAL,
             metadata TEXT,
             access_count INTEGER DEFAULT 0,
-            last_accessed_at REAL NOT NULL
+            last_accessed_at REAL NOT NULL,
+            tombstoned INTEGER DEFAULT 0,
+            tombstoned_at REAL
         )
         """)
         
@@ -126,7 +128,7 @@ class SQLiteCacheStore(BaseCacheStore):
                 f"""
                 SELECT value, expires_at 
                 FROM {self.table_name} 
-                WHERE key = ? AND (expires_at IS NULL OR expires_at > ?)
+                WHERE key = ? AND (expires_at IS NULL OR expires_at > ?) AND tombstoned = 0
                 """,
                 (prompt, now)
             )
@@ -174,16 +176,27 @@ class SQLiteCacheStore(BaseCacheStore):
         finally:
             self._return_connection(conn)
             
-    async def delete(self, key: str) -> bool:
+    async def delete(self, key: str, mode: DeletionMode = DeletionMode.DIRECT) -> bool:
         """
         Delete a key from the SQLite cache.
         
         Args:
             key: The key to delete
+            mode: Deletion mode (DIRECT or TOMBSTONE)
             
         Returns:
             bool: True if the key was found and deleted, False otherwise
         """
+        if mode == DeletionMode.TOMBSTONE:
+            logger.info(f"Tombstoning requested for SQLite store, using direct deletion for key: {key}")
+            # Fall back to direct deletion for external stores
+            return await self._direct_delete(key)
+        
+        return await self._direct_delete(key)
+    
+    async def _direct_delete(self, key: str) -> bool:
+        """Direct deletion implementation."""
+        
         if self._closed:
             raise CacheOperationError("Cache store is closed")
             
@@ -211,6 +224,104 @@ class SQLiteCacheStore(BaseCacheStore):
             
         except sqlite3.Error as e:
             raise CacheOperationError(f"Failed to delete key '{key}' from SQLite cache", original_exception=e) from e
+        finally:
+            self._return_connection(conn)
+    
+    async def tombstone(self, key: str) -> bool:
+        """
+        Mark a key as deleted (tombstoning) without removing it from storage.
+        
+        Args:
+            key: The key to tombstone
+            
+        Returns:
+            bool: True if the key was found and tombstoned, False otherwise
+        """
+        if self._closed:
+            raise CacheOperationError("Cache store is closed")
+            
+        conn = await self._get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            # First check if the key exists
+            cursor.execute(
+                f"SELECT 1 FROM {self.table_name} WHERE key = ?",
+                (key,)
+            )
+            exists = cursor.fetchone() is not None
+            
+            if not exists:
+                return False
+                
+            # Mark as tombstoned
+            cursor.execute(
+                f"UPDATE {self.table_name} SET tombstoned = 1, tombstoned_at = ? WHERE key = ?",
+                (time.time(), key)
+            )
+            conn.commit()
+            return True
+            
+        except sqlite3.Error as e:
+            raise CacheOperationError(f"Failed to tombstone key '{key}' in SQLite cache", original_exception=e) from e
+        finally:
+            self._return_connection(conn)
+    
+    async def is_tombstoned(self, key: str) -> bool:
+        """
+        Check if a key is tombstoned.
+        
+        Args:
+            key: The key to check
+            
+        Returns:
+            bool: True if the key is tombstoned, False otherwise
+        """
+        if self._closed:
+            raise CacheOperationError("Cache store is closed")
+            
+        conn = await self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT tombstoned FROM {self.table_name} WHERE key = ?",
+                (key,)
+            )
+            result = cursor.fetchone()
+            return result is not None and result[0] == 1
+            
+        except sqlite3.Error as e:
+            logger.error(f"SQLite error checking tombstone status for key '{key}': {e}")
+            return False
+        finally:
+            self._return_connection(conn)
+    
+    async def purge_tombstones(self) -> int:
+        """
+        Permanently remove all tombstoned keys from storage.
+        
+        Returns:
+            int: Number of tombstoned keys that were purged
+        """
+        if self._closed:
+            raise CacheOperationError("Cache store is closed")
+            
+        conn = await self._get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            # Count tombstoned items before deletion
+            cursor.execute(f"SELECT COUNT(*) FROM {self.table_name} WHERE tombstoned = 1")
+            count = cursor.fetchone()[0] or 0
+            
+            # Delete tombstoned items
+            cursor.execute(f"DELETE FROM {self.table_name} WHERE tombstoned = 1")
+            conn.commit()
+            
+            return count
+            
+        except sqlite3.Error as e:
+            raise CacheOperationError("Failed to purge tombstones from SQLite cache", original_exception=e) from e
         finally:
             self._return_connection(conn)
 

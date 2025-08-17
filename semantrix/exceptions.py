@@ -44,7 +44,15 @@ class ValidationError(SemantrixError, ValueError):
 
 class OperationError(SemantrixError):
     """Raised when a general operation fails."""
-    pass
+    def __init__(self, message: str, original_exception: Exception = None):
+        super().__init__(message)
+        self.original_exception = original_exception
+        self.message = message
+
+    def __str__(self) -> str:
+        if self.original_exception:
+            return f"{self.message} (Original: {str(self.original_exception)})"
+        return self.message
 
 class RetryError(SemantrixError):
     """Raised when the maximum number of retries is exceeded."""

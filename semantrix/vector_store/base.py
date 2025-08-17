@@ -213,21 +213,58 @@ class BaseVectorStore(ABC):
         self,
         ids: Optional[Union[str, List[str]]] = None,
         filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
         **kwargs: Any
     ) -> bool:
         """
-        Delete vectors by ID or filter.
+        Delete vectors by ID, filter, or document text.
         
         Args:
             ids: Single ID or list of IDs to delete
             filter: Optional metadata filter for bulk deletion
+            documents: Document text(s) to delete
             **kwargs: Additional implementation-specific parameters
             
         Returns:
             True if deletion was successful
             
         Note:
-            At least one of ids or filter must be provided
+            At least one of ids, filter, or documents must be provided
+        """
+        pass
+    
+    @abstractmethod
+    async def tombstone(
+        self,
+        ids: Optional[Union[str, List[str]]] = None,
+        filter: Optional[MetadataFilter] = None,
+        documents: Optional[Union[str, List[str]]] = None,
+        **kwargs: Any
+    ) -> bool:
+        """
+        Mark vectors as tombstoned (deleted) without immediately removing them.
+        
+        Args:
+            ids: Single ID or list of IDs to tombstone
+            filter: Optional metadata filter for bulk tombstoning
+            documents: Document text(s) to tombstone
+            **kwargs: Additional implementation-specific parameters
+            
+        Returns:
+            True if tombstoning was successful
+            
+        Note:
+            At least one of ids, filter, or documents must be provided
+        """
+        pass
+    
+    @abstractmethod
+    async def purge_tombstones(self) -> int:
+        """
+        Permanently remove all tombstoned vectors from storage.
+        
+        Returns:
+            int: Number of tombstoned vectors that were purged
         """
         pass
     

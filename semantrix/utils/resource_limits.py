@@ -45,4 +45,17 @@ class ResourceLimits:
             warnings.warn("CPU limit exceeded")
             return False
             
-        return True 
+        return True
+    
+    def is_memory_high(self) -> bool:
+        """Check if memory usage is high."""
+        process = psutil.Process()
+        
+        if self.max_memory_gb is not None:
+            mem_gb = process.memory_info().rss / (1024 ** 3)
+            return mem_gb > (self.max_memory_gb * 0.8)  # 80% of limit
+        elif self.max_memory_percent is not None:
+            mem_percent = psutil.virtual_memory().percent
+            return mem_percent > (self.max_memory_percent * 0.8)  # 80% of limit
+        
+        return False 

@@ -18,7 +18,7 @@ from google.api_core.exceptions import GoogleAPICallError, RetryError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
-from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy
+from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy, DeletionMode
 from semantrix.exceptions import CacheOperationError
 
 # Configure logging
@@ -173,6 +173,11 @@ class GoogleMemorystoreCacheStore(BaseCacheStore):
             if not self._redis_client:
                 return None
                 
+            # Check if item is tombstoned
+            tombstoned = await self._redis_client.hget(f"{prompt}:meta", "tombstoned")
+            if tombstoned == "1":
+                return None
+                
             value = await self._redis_client.get(prompt)
             if value and self._redis_client:
                 # Update last accessed time (for LRU eviction)
@@ -215,16 +220,27 @@ class GoogleMemorystoreCacheStore(BaseCacheStore):
             logger.error(f"Error adding item to Google Memorystore: {e}")
             raise CacheOperationError("Failed to add item to Google Memorystore", original_exception=e) from e
             
-    async def delete(self, key: str) -> bool:
+    async def delete(self, key: str, mode: DeletionMode = DeletionMode.DIRECT) -> bool:
         """
         Delete a key from the Google Memorystore cache.
         
         Args:
             key: The key to delete
+            mode: Deletion mode (DIRECT or TOMBSTONE)
             
         Returns:
             bool: True if the key was found and deleted, False otherwise
         """
+        if mode == DeletionMode.TOMBSTONE:
+            logger.info(f"Tombstoning requested for Google Memorystore, using direct deletion for key: {key}")
+            # Fall back to direct deletion for external stores
+            return await self._direct_delete(key)
+        
+        return await self._direct_delete(key)
+    
+    async def _direct_delete(self, key: str) -> bool:
+        """Direct deletion implementation."""
+        
         try:
             await self._ensure_connected()
             if not self._redis_client:
@@ -242,6 +258,98 @@ class GoogleMemorystoreCacheStore(BaseCacheStore):
         except (RedisError, GoogleAPICallError) as e:
             logger.error(f"Error deleting key from Google Memorystore: {e}")
             raise CacheOperationError(f"Failed to delete key from Google Memorystore: {key}", original_exception=e) from e
+    
+    async def tombstone(self, key: str) -> bool:
+        """
+        Mark a key as deleted (tombstoning) without removing it from storage.
+        
+        Args:
+            key: The key to tombstone
+            
+        Returns:
+            bool: True if the key was found and tombstoned, False otherwise
+        """
+        try:
+            await self._ensure_connected()
+            if not self._redis_client:
+                return False
+                
+            # Check if key exists
+            exists = await self._redis_client.exists(key)
+            if not exists:
+                return False
+                
+            # Add tombstone flag to metadata
+            metadata = {
+                "tombstoned": "1",
+                "tombstoned_at": str(time.time())
+            }
+            await self._redis_client.hset(f"{key}:meta", mapping=metadata)
+            
+            return True
+            
+        except (RedisError, GoogleAPICallError) as e:
+            logger.error(f"Error tombstoning key in Google Memorystore: {e}")
+            raise CacheOperationError(f"Failed to tombstone key in Google Memorystore: {key}", original_exception=e) from e
+    
+    async def is_tombstoned(self, key: str) -> bool:
+        """
+        Check if a key is tombstoned.
+        
+        Args:
+            key: The key to check
+            
+        Returns:
+            bool: True if the key is tombstoned, False otherwise
+        """
+        try:
+            await self._ensure_connected()
+            if not self._redis_client:
+                return False
+                
+            tombstoned = await self._redis_client.hget(f"{key}:meta", "tombstoned")
+            return tombstoned == "1"
+            
+        except (RedisError, GoogleAPICallError) as e:
+            logger.error(f"Error checking tombstone status in Google Memorystore: {e}")
+            return False
+    
+    async def purge_tombstones(self) -> int:
+        """
+        Permanently remove all tombstoned keys from storage.
+        
+        Returns:
+            int: Number of tombstoned keys that were purged
+        """
+        try:
+            await self._ensure_connected()
+            if not self._redis_client:
+                return 0
+                
+            # Get all keys
+            keys = await self._redis_client.keys("*")
+            cache_keys = [k for k in keys if not k.endswith(":meta") and ":" not in k]
+            
+            purged_count = 0
+            pipeline = self._redis_client.pipeline()
+            
+            for key in cache_keys:
+                # Check if this key is tombstoned
+                tombstoned = await self._redis_client.hget(f"{key}:meta", "tombstoned")
+                if tombstoned == "1":
+                    # Delete both the key and its metadata
+                    pipeline.delete(key)
+                    pipeline.delete(f"{key}:meta")
+                    purged_count += 1
+            
+            if purged_count > 0:
+                await pipeline.execute()
+            
+            return purged_count
+            
+        except (RedisError, GoogleAPICallError) as e:
+            logger.error(f"Error purging tombstones from Google Memorystore: {e}")
+            raise CacheOperationError("Failed to purge tombstones from Google Memorystore", original_exception=e) from e
     
     async def clear(self) -> None:
         """Clear all items from the cache."""

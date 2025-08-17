@@ -26,7 +26,7 @@ except ImportError:
     psutil = None  # type: ignore[assignment]
     PSUTIL_AVAILABLE = False
 
-from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy
+from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, DeletionMode
 from semantrix.cache_store.strategies import LRUEvictionStrategy, TTLStrategy
 from semantrix.cache_store.eviction_policies import StrategyBasedEvictionPolicy, NoOpEvictionPolicy
 from semantrix.exceptions import CacheOperationError
@@ -156,6 +156,9 @@ class InMemoryStore(BaseCacheStore):
         self._eviction_task: Optional[asyncio.Task] = None
         self._running = False
         self._closed = False
+        
+        # Track vector IDs for deletion
+        self._prompt_to_vector_ids: Dict[str, List[str]] = {}
         
         # Initialize metrics and memory tracking
         self.memory_high_watermark = 0.0
@@ -728,22 +731,114 @@ class InMemoryStore(BaseCacheStore):
                 # Don't let cleanup exceptions propagate
                 pass
 
-    async def delete(self, key: str) -> bool:
+    async def delete(self, key: str, mode: DeletionMode = DeletionMode.DIRECT) -> bool:
         """
         Delete an item from the cache.
         
         Args:
             key: Cache key to delete
+            mode: Deletion mode (direct, semantic, or tombstone)
             
         Returns:
             bool: True if the key existed and was deleted, False otherwise
         """
+        if mode == DeletionMode.TOMBSTONE:
+            return await self.tombstone(key)
+        
         if key in self._cache:
             async with self._metrics_lock:
                 del self._cache[key]
+                # Also remove vector ID mapping
+                self._prompt_to_vector_ids.pop(key, None)
                 self._metrics.current_size = len(self._cache)
             return True
         return False
+    
+
+    
+    async def tombstone(self, key: str) -> bool:
+        """
+        Mark a key as deleted (tombstoning) without removing it from storage.
+        
+        Args:
+            key: The key to tombstone
+            
+        Returns:
+            bool: True if the key was found and tombstoned, False otherwise
+        """
+        if key in self._cache:
+            value = self._cache[key]
+            if isinstance(value, dict):
+                # Add tombstone flag to existing dict
+                value['tombstoned'] = True
+                value['tombstoned_at'] = time.time()
+            else:
+                # Convert to dict format with tombstone flag
+                self._cache[key] = {
+                    'response': value,
+                    'tombstoned': True,
+                    'tombstoned_at': time.time(),
+                    'timestamp': time.time()
+                }
+            return True
+        return False
+    
+    async def is_tombstoned(self, key: str) -> bool:
+        """
+        Check if a key is tombstoned.
+        
+        Args:
+            key: The key to check
+            
+        Returns:
+            bool: True if the key is tombstoned, False otherwise
+        """
+        if key in self._cache:
+            value = self._cache[key]
+            if isinstance(value, dict):
+                return value.get('tombstoned', False)
+        return False
+    
+    async def get_vector_ids(self, prompt: str) -> List[str]:
+        """
+        Get vector IDs associated with a prompt.
+        
+        Args:
+            prompt: The prompt to get vector IDs for
+            
+        Returns:
+            List[str]: List of vector IDs associated with the prompt
+        """
+        return self._prompt_to_vector_ids.get(prompt, [])
+    
+    async def purge_tombstones(self) -> int:
+        """
+        Permanently remove all tombstoned keys from storage.
+        
+        Returns:
+            int: Number of tombstoned keys that were purged
+        """
+        purged_count = 0
+        keys_to_purge = []
+        
+        # Find all tombstoned keys
+        for key, value in self._cache.items():
+            if isinstance(value, dict) and value.get('tombstoned', False):
+                keys_to_purge.append(key)
+        
+        # Remove tombstoned keys
+        for key in keys_to_purge:
+            del self._cache[key]
+            # Also remove vector ID mapping
+            self._prompt_to_vector_ids.pop(key, None)
+            purged_count += 1
+        
+        # Update metrics
+        if purged_count > 0:
+            async with self._metrics_lock:
+                self._metrics.current_size = len(self._cache)
+        
+        return purged_count
 
     async def get_exact(self, prompt: str) -> Optional[str]:
         """
@@ -759,6 +854,11 @@ class InMemoryStore(BaseCacheStore):
             if prompt in self._cache:
                 value = self._cache[prompt]
                 if isinstance(value, dict):
+                    # Check if item is tombstoned
+                    if value.get('tombstoned', False):
+                        self._metrics.misses += 1
+                        return None
+                    
                     # Check for TTL expiration
                     if 'expires_at' in value and time.time() > value['expires_at']:
                         del self._cache[prompt]
@@ -789,6 +889,11 @@ class InMemoryStore(BaseCacheStore):
             if key in self._cache:
                 value = self._cache[key]
                 if isinstance(value, dict):
+                    # Check if item is tombstoned
+                    if value.get('tombstoned', False):
+                        self._metrics.misses += 1
+                        return None
+                    
                     # Check for TTL expiration
                     if 'expires_at' in value and time.time() > value['expires_at']:
                         del self._cache[key]
@@ -809,7 +914,7 @@ class InMemoryStore(BaseCacheStore):
             self._metrics.misses += 1
             return None
 
-    async def add(self, prompt: str, response: str) -> None:
+    async def add(self, prompt: str, response: str, vector_ids: Optional[List[str]] = None) -> None:
         if self.enable_ttl:
             self._cache[prompt] = {
                 'response': response,
@@ -819,6 +924,10 @@ class InMemoryStore(BaseCacheStore):
         else:
             self._cache[prompt] = response
         self._cache.move_to_end(prompt)
+        
+        # Track vector IDs if provided
+        if vector_ids:
+            self._prompt_to_vector_ids[prompt] = vector_ids
         
         # Trigger eviction if we're over size limit
         if len(self._cache) > self.max_size * 1.1:  # 10% over limit
