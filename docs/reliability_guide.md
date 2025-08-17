@@ -209,7 +209,7 @@ with with_correlation_id("request-123") as correlation_id:
 
 ### Metrics Collection
 
-Comprehensive metrics for monitoring system health:
+Comprehensive metrics for monitoring system health with automatic collection:
 
 ```python
 from semantrix.utils.metrics import (
@@ -217,14 +217,28 @@ from semantrix.utils.metrics import (
     gauge,
     histogram,
     timer,
-    collect_metrics
+    collect_metrics,
+    get_metrics_registry
 )
 
-# Define metrics
-request_counter = counter("requests_total", "Total requests")
-error_counter = counter("errors_total", "Total errors")
-response_time = histogram("response_time_seconds", "Response time distribution")
-active_connections = gauge("active_connections", "Active connections")
+# Pre-defined metrics (automatically collected)
+from semantrix.utils.metrics import (
+    REQUEST_COUNTER,
+    ERROR_COUNTER,
+    CACHE_HIT_COUNTER,
+    CACHE_MISS_COUNTER,
+    SEMANTIC_SEARCH_COUNTER,
+    EMBEDDING_GENERATION_COUNTER,
+    REQUEST_DURATION_HISTOGRAM,
+    SEMANTIC_SEARCH_DURATION_HISTOGRAM,
+    EMBEDDING_DURATION_HISTOGRAM
+)
+
+# Custom metrics
+request_counter = counter("semantrix_requests_total", "Total requests")
+error_counter = counter("semantrix_errors_total", "Total errors")
+response_time = histogram("semantrix_response_time_seconds", "Response time distribution")
+active_connections = gauge("semantrix_active_connections", "Active connections")
 
 # Use metrics
 request_counter.increment()
@@ -238,12 +252,87 @@ with timer("operation_duration") as t:
 metrics = collect_metrics()
 ```
 
+#### Automatic Metrics Collection
+
+Semantrix automatically collects metrics for all cache operations:
+
+- **Request Counters**: Total requests, cache hits, cache misses
+- **Performance Histograms**: Request duration, semantic search duration, embedding generation time
+- **Operation Counters**: Semantic searches, embedding generations, vector store operations
+- **Error Tracking**: All errors are automatically counted
+- **Background Sync**: Metrics are automatically synced to OpenTelemetry every 30 seconds
+
 ### Metrics Types
 
 1. **Counters**: Only increase (requests, errors, cache hits)
 2. **Gauges**: Can go up and down (active connections, memory usage)
 3. **Histograms**: Track value distributions (response times, request sizes)
 4. **Timers**: Measure operation durations
+
+### Automatic Metrics Integration
+
+Semantrix automatically integrates metrics into all core operations:
+
+```python
+# Initialize Semantrix (metrics are automatically enabled)
+cache = Semantrix(enable_logging=True)
+await cache.initialize()
+
+# All operations automatically collect metrics
+await cache.set("prompt", "response")  # Increments REQUEST_COUNTER, tracks duration
+await cache.get("prompt")              # Increments REQUEST_COUNTER, tracks hits/misses
+await cache.tombstone("prompt")        # Increments TOMBSTONE_OPERATIONS_COUNTER
+
+# Metrics are automatically synced to OpenTelemetry every 30 seconds
+# No additional configuration needed
+```
+
+#### Available Pre-defined Metrics
+
+**Core Operation Metrics:**
+- `semantrix_requests_total`: Total number of requests
+- `semantrix_errors_total`: Total number of errors
+- `semantrix_cache_hits_total`: Total number of cache hits
+- `semantrix_cache_misses_total`: Total number of cache misses
+- `semantrix_semantic_searches_total`: Total number of semantic searches
+- `semantrix_embeddings_generated_total`: Total number of embeddings generated
+- `semantrix_vector_store_operations_total`: Total number of vector store operations
+- `semantrix_tombstone_operations_total`: Total number of tombstone operations
+- `semantrix_request_duration_seconds`: Request duration distribution
+- `semantrix_semantic_search_duration_seconds`: Semantic search duration distribution
+- `semantrix_embedding_duration_seconds`: Embedding generation duration distribution
+
+**Cache Store-Specific Metrics:**
+- `semantrix_redis_operations_total`: Redis operations count
+- `semantrix_mongodb_queries_total`: MongoDB queries count
+- `semantrix_postgresql_operations_total`: PostgreSQL operations count
+- `semantrix_dynamodb_operations_total`: DynamoDB operations count
+- And more for all supported stores
+
+**Vector Store Performance Metrics:**
+- `semantrix_faiss_operations_total`: FAISS operations count
+- `semantrix_pinecone_operations_total`: Pinecone operations count
+- `semantrix_qdrant_operations_total`: Qdrant operations count
+- `semantrix_vector_search_latency_seconds`: Vector search latency
+- And more for all supported vector stores
+
+**Embedding Model Metrics:**
+- `semantrix_openai_embedding_operations_total`: OpenAI embedding operations
+- `semantrix_sentence_transformer_operations_total`: Sentence Transformer operations
+- `semantrix_embedding_model_latency_seconds`: Embedding model latency
+- And more for all supported embedders
+
+**Business Intelligence Metrics:**
+- `semantrix_cache_hit_rate_percentage`: Cache hit rate percentage
+- `semantrix_cache_effectiveness_score`: Cache effectiveness score (0-1)
+- `semantrix_user_satisfaction_score`: User satisfaction score (0-1)
+- `semantrix_response_time_percentile_95_seconds`: 95th percentile response time
+
+**Resource Utilization Metrics:**
+- `semantrix_memory_usage_bytes`: Memory usage in bytes
+- `semantrix_cpu_usage_percentage`: CPU usage percentage
+- `semantrix_disk_io_operations_total`: Disk I/O operations count
+- `semantrix_network_bandwidth_bytes`: Network bandwidth usage
 
 ## OpenTelemetry Integration
 

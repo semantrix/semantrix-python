@@ -25,6 +25,13 @@ except ImportError:
 
 from semantrix.exceptions import VectorOperationError
 from semantrix.utils.logging import get_logger
+from semantrix.utils.metrics import (
+    FAISS_OPERATIONS_COUNTER, FAISS_OPERATION_DURATION_HISTOGRAM,
+    FAISS_INDEX_BUILD_TIME_HISTOGRAM, FAISS_MEMORY_USAGE_GAUGE,
+    FAISS_SEARCH_COMPLEXITY_GAUGE, VECTOR_SEARCH_LATENCY_HISTOGRAM,
+    VECTOR_INDEX_SIZE_GAUGE, VECTOR_SEARCH_RESULTS_COUNT_HISTOGRAM,
+    VECTOR_SEARCH_ACCURACY_SCORE_HISTOGRAM
+)
 
 from ..base import (
     BaseVectorStore, DistanceMetric, IndexType, Metadata, MetadataFilter, 
@@ -98,6 +105,36 @@ class FAISSVectorStore(BaseVectorStore):
         self._is_trained = False
         
         # Initialize index
+        
+        # Add method to update FAISS metrics
+        self._update_faiss_metrics()
+    
+    def _update_faiss_metrics(self):
+        """Update FAISS-specific metrics like memory usage and index size."""
+        try:
+            if self._index is not None:
+                # Update index size
+                if hasattr(self._index, 'ntotal'):
+                    VECTOR_INDEX_SIZE_GAUGE.set(self._index.ntotal)
+                
+                # Update memory usage (approximate)
+                if hasattr(self._index, 'ntotal') and hasattr(self._index, 'd'):
+                    # Rough estimate: ntotal * dimension * 4 bytes (float32)
+                    memory_usage = self._index.ntotal * self._index.d * 4
+                    FAISS_MEMORY_USAGE_GAUGE.set(memory_usage)
+                
+                # Update search complexity
+                if hasattr(self._index, 'nprobe'):
+                    FAISS_SEARCH_COMPLEXITY_GAUGE.set(self._index.nprobe)
+                elif hasattr(self._index, 'efSearch'):
+                    FAISS_SEARCH_COMPLEXITY_GAUGE.set(self._index.efSearch)
+                else:
+                    FAISS_SEARCH_COMPLEXITY_GAUGE.set(1.0)
+        except Exception as e:
+            logger.debug("Could not update FAISS metrics", extra={
+                "error_type": type(e).__name__,
+                "error_message": str(e)
+            })
         self._init_index()
         
         # Load from disk if persistence is enabled and index exists
@@ -563,73 +600,99 @@ class FAISSVectorStore(BaseVectorStore):
         """
         if self._index is None or not self._id_to_record:
             return []
-            
-        # Process query vector
-        query_vector_np = self._normalize_vector(query_vector)
         
-        # Apply filter if provided
-        if filter is not None:
-            filtered_records = await self._run_in_executor(
-                self._filter_records, filter
-            )
-            if not filtered_records:
-                return []
-                
-            # NEW: Get filtered integer IDs for FAISS
-            filtered_int_ids = []
-            for record in filtered_records:
-                if record.id in self._string_id_to_int_id:
-                    filtered_int_ids.append(self._string_id_to_int_id[record.id])
-            
-            if not filtered_int_ids:
-                return []
-                
-            # Create ID selector
-            selector = faiss.IDSelectorBatch(
-                len(filtered_int_ids),
-                faiss.swig_ptr(np.array(filtered_int_ids, dtype=np.int64))
-            )
-            
-            # Search with filter
-            k = min(k, len(filtered_int_ids))
-            distances, indices = self._index.search(
-                query_vector_np, 
-                k, 
-                params=faiss.SearchParametersIVF(sel=selector) if hasattr(faiss, 'SearchParametersIVF') else None
-            )
-        else:
-            # Regular search without filter
-            k = min(k, len(self._id_to_record))
-            distances, indices = self._index.search(query_vector_np, k)
+        # Increment FAISS operations counter
+        FAISS_OPERATIONS_COUNTER.increment()
         
-        # Convert to results
-        results: List[QueryResult] = []
-        
-        for i, (distance, int_idx) in enumerate(zip(distances[0], indices[0])):
-            if int_idx < 0:  # Skip invalid indices
-                continue
+        # Use timer for FAISS operation duration
+        with FAISS_OPERATION_DURATION_HISTOGRAM.time() as timer:
+            # Use timer for vector search latency
+            with VECTOR_SEARCH_LATENCY_HISTOGRAM.time() as search_timer:
+                # Process query vector
+                query_vector_np = self._normalize_vector(query_vector)
                 
-            # NEW: Convert integer ID back to string ID
-            if int_idx in self._int_id_to_string_id:
-                string_id = self._int_id_to_string_id[int_idx]
-                record = self._id_to_record.get(string_id)
-                
-                if record is not None:
-                    # Skip tombstoned vectors
-                    if (record.metadata and 
-                        record.metadata.get('tombstoned', False)):
-                        continue
-                    
-                    result = QueryResult(
-                        id=string_id,
-                        score=self._denormalize_score(distance),
-                        vector=record.embedding if include_vectors else None,
-                        metadata=record.metadata if include_metadata else None,
-                        document=record.document if include_metadata else None
+                # Apply filter if provided
+                if filter is not None:
+                    filtered_records = await self._run_in_executor(
+                        self._filter_records, filter
                     )
-                    results.append(result)
-        
-        return results
+                    if not filtered_records:
+                        return []
+                        
+                    # NEW: Get filtered integer IDs for FAISS
+                    filtered_int_ids = []
+                    for record in filtered_records:
+                        if record.id in self._string_id_to_int_id:
+                            filtered_int_ids.append(self._string_id_to_int_id[record.id])
+                    
+                    if not filtered_int_ids:
+                        return []
+                        
+                    # Create ID selector
+                    selector = faiss.IDSelectorBatch(
+                        len(filtered_int_ids),
+                        faiss.swig_ptr(np.array(filtered_int_ids, dtype=np.int64))
+                    )
+                    
+                    # Search with filter
+                    k = min(k, len(filtered_int_ids))
+                    distances, indices = self._index.search(
+                        query_vector_np, 
+                        k, 
+                        params=faiss.SearchParametersIVF(sel=selector) if hasattr(faiss, 'SearchParametersIVF') else None
+                    )
+                else:
+                    # Regular search without filter
+                    k = min(k, len(self._id_to_record))
+                    distances, indices = self._index.search(query_vector_np, k)
+                
+                # Convert to results
+                results: List[QueryResult] = []
+                
+                for i, (distance, int_idx) in enumerate(zip(distances[0], indices[0])):
+                    if int_idx < 0:  # Skip invalid indices
+                        continue
+                        
+                    # NEW: Convert integer ID back to string ID
+                    if int_idx in self._int_id_to_string_id:
+                        string_id = self._int_id_to_string_id[int_idx]
+                        record = self._id_to_record.get(string_id)
+                        
+                        if record is not None:
+                            # Skip tombstoned vectors
+                            if (record.metadata and 
+                                record.metadata.get('tombstoned', False)):
+                                continue
+                            
+                            result = QueryResult(
+                                id=string_id,
+                                score=self._denormalize_score(distance),
+                                vector=record.embedding if include_vectors else None,
+                                metadata=record.metadata if include_metadata else None,
+                                document=record.document if include_metadata else None
+                            )
+                            results.append(result)
+                
+                # Update vector store metrics
+                VECTOR_SEARCH_RESULTS_COUNT_HISTOGRAM.observe(len(results))
+                if results:
+                    # Calculate average accuracy score from top results
+                    avg_score = sum(result.score for result in results) / len(results)
+                    VECTOR_SEARCH_ACCURACY_SCORE_HISTOGRAM.observe(avg_score)
+                
+                # Update FAISS-specific metrics
+                if hasattr(self._index, 'ntotal'):
+                    VECTOR_INDEX_SIZE_GAUGE.set(self._index.ntotal)
+                
+                # Update search complexity based on index type
+                if hasattr(self._index, 'nprobe'):
+                    FAISS_SEARCH_COMPLEXITY_GAUGE.set(self._index.nprobe)
+                elif hasattr(self._index, 'efSearch'):
+                    FAISS_SEARCH_COMPLEXITY_GAUGE.set(self._index.efSearch)
+                else:
+                    FAISS_SEARCH_COMPLEXITY_GAUGE.set(1.0)  # Default complexity for flat index
+                
+                return results
     
     async def get(
         self,

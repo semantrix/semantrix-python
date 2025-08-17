@@ -30,6 +30,18 @@ from semantrix.exceptions import (
 )
 from semantrix.utils.logging import get_logger, get_adapter, with_correlation_id, get_metrics_logger
 from semantrix.utils.logging_config import configure_from_environment
+from semantrix.utils.metrics import (
+    REQUEST_COUNTER, ERROR_COUNTER, CACHE_HIT_COUNTER, CACHE_MISS_COUNTER,
+    REQUEST_DURATION_HISTOGRAM, SEMANTIC_SEARCH_COUNTER, SEMANTIC_SEARCH_DURATION_HISTOGRAM,
+    EMBEDDING_GENERATION_COUNTER, EMBEDDING_DURATION_HISTOGRAM,
+    VECTOR_STORE_OPERATIONS_COUNTER, TOMBSTONE_OPERATIONS_COUNTER,
+    CACHE_HIT_RATE_GAUGE, CACHE_EFFECTIVENESS_SCORE_GAUGE, SEMANTIC_SIMILARITY_DISTRIBUTION_HISTOGRAM,
+    RESPONSE_TIME_PERCENTILE_95_HISTOGRAM, RESPONSE_TIME_PERCENTILE_99_HISTOGRAM,
+    USER_SATISFACTION_SCORE_GAUGE, QUERY_COMPLEXITY_SCORE_HISTOGRAM,
+    MEMORY_USAGE_GAUGE, CPU_USAGE_GAUGE, DISK_IO_OPERATIONS_COUNTER, NETWORK_BANDWIDTH_GAUGE,
+    ACTIVE_CONNECTIONS_TOTAL_GAUGE, CONNECTION_POOL_UTILIZATION_GAUGE, THREAD_POOL_SIZE_GAUGE, QUEUE_DEPTH_GAUGE,
+    get_metrics_registry
+)
 
 # Set up logging
 logger = get_logger(__name__)
@@ -98,6 +110,17 @@ class Semantrix:
         # Initialize logging components
         self.metrics_logger = get_metrics_logger()
         
+        # Initialize metrics sync
+        self._metrics_sync_task = None
+        self._enable_metrics_sync = True
+        
+        # Initialize business intelligence tracking
+        self._total_requests = 0
+        self._total_hits = 0
+        self._total_misses = 0
+        self._response_times = []
+        self._similarity_scores = []
+        
         # Track in-progress operations for idempotency
         self._pending_operations: Dict[str, asyncio.Task] = {}
         self._operation_lock = asyncio.Lock()
@@ -135,18 +158,28 @@ class Semantrix:
                 # Recover any pending operations
                 await self._recover_pending_operations()
         
-        # Start background tombstone cleanup task
+        # Start background tasks
         self._start_tombstone_cleanup_task()
+        self._start_metrics_sync_task()
     
         self._initialized = True
     
     async def shutdown(self):
         """Gracefully shutdown the cache and its components."""
         # Stop background tasks
+        self._enable_metrics_sync = False
+        
         if self._tombstone_cleanup_task and not self._tombstone_cleanup_task.done():
             self._tombstone_cleanup_task.cancel()
             try:
                 await self._tombstone_cleanup_task
+            except asyncio.CancelledError:
+                pass
+        
+        if self._metrics_sync_task and not self._metrics_sync_task.done():
+            self._metrics_sync_task.cancel()
+            try:
+                await self._metrics_sync_task
             except asyncio.CancelledError:
                 pass
         
@@ -347,6 +380,168 @@ class Semantrix:
             )
             logger.debug("Started background tombstone cleanup task")
     
+    def _start_metrics_sync_task(self):
+        """Start the background metrics sync task."""
+        if self._metrics_sync_task is None or self._metrics_sync_task.done():
+            self._metrics_sync_task = asyncio.create_task(
+                self._metrics_sync_loop(),
+                name=f"Semantrix-metrics-sync-{id(self)}"
+            )
+            logger.debug("Started background metrics sync task")
+    
+    async def _metrics_sync_loop(self):
+        """Background task to sync metrics to OpenTelemetry."""
+        while self._enable_metrics_sync:
+            try:
+                # Update business intelligence metrics
+                self._update_business_intelligence_metrics()
+                
+                # Try to import and sync metrics to OpenTelemetry
+                try:
+                    from semantrix.integrations.opentelemetry import sync_metrics_to_opentelemetry
+                    sync_metrics_to_opentelemetry()
+                    logger.debug("Metrics synced to OpenTelemetry")
+                except ImportError:
+                    # OpenTelemetry not available, skip sync
+                    pass
+                except Exception as e:
+                    logger.warning("Failed to sync metrics to OpenTelemetry", extra={
+                        "error_type": type(e).__name__,
+                        "error_message": str(e)
+                    })
+                
+                # Sync every 30 seconds
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Error in metrics sync loop", extra={
+                    "error_type": type(e).__name__,
+                    "error_message": str(e)
+                }, exc_info=True)
+                await asyncio.sleep(5)  # Wait before retrying
+    
+    def _update_business_intelligence_metrics(self):
+        """Update business intelligence metrics."""
+        try:
+            # Update cache hit rate
+            if self._total_requests > 0:
+                hit_rate = (self._total_hits / self._total_requests) * 100
+                CACHE_HIT_RATE_GAUGE.set(hit_rate)
+                
+                # Calculate cache effectiveness score (0-1)
+                # Higher score for higher hit rates and lower response times
+                effectiveness_score = min(1.0, hit_rate / 100.0)
+                if self._response_times:
+                    avg_response_time = sum(self._response_times) / len(self._response_times)
+                    # Penalize for high response times
+                    if avg_response_time > 1.0:  # More than 1 second
+                        effectiveness_score *= 0.8
+                CACHE_EFFECTIVENESS_SCORE_GAUGE.set(effectiveness_score)
+            
+            # Update response time percentiles
+            if self._response_times:
+                sorted_times = sorted(self._response_times)
+                if len(sorted_times) >= 20:  # Need at least 20 samples for meaningful percentiles
+                    p95_index = int(len(sorted_times) * 0.95)
+                    p99_index = int(len(sorted_times) * 0.99)
+                    
+                    if p95_index < len(sorted_times):
+                        RESPONSE_TIME_PERCENTILE_95_HISTOGRAM.observe(sorted_times[p95_index])
+                    if p99_index < len(sorted_times):
+                        RESPONSE_TIME_PERCENTILE_99_HISTOGRAM.observe(sorted_times[p99_index])
+            
+            # Update similarity score distribution
+            if self._similarity_scores:
+                for score in self._similarity_scores[-100:]:  # Keep last 100 scores
+                    SEMANTIC_SIMILARITY_DISTRIBUTION_HISTOGRAM.observe(score)
+            
+            # Calculate user satisfaction score based on performance
+            if self._total_requests > 0:
+                satisfaction_score = 0.0
+                
+                # Factor 1: Hit rate (40% weight)
+                hit_rate_factor = min(1.0, (self._total_hits / self._total_requests) * 2.0)  # 50% hit rate = 1.0
+                satisfaction_score += hit_rate_factor * 0.4
+                
+                # Factor 2: Response time (30% weight)
+                if self._response_times:
+                    avg_response_time = sum(self._response_times) / len(self._response_times)
+                    response_time_factor = max(0.0, 1.0 - (avg_response_time / 2.0))  # 2s = 0, 0s = 1
+                    satisfaction_score += response_time_factor * 0.3
+                
+                # Factor 3: Error rate (30% weight)
+                error_rate = ERROR_COUNTER.get_value() / max(1, self._total_requests)
+                error_factor = max(0.0, 1.0 - error_rate * 10)  # 10% error rate = 0, 0% = 1
+                satisfaction_score += error_factor * 0.3
+                
+                USER_SATISFACTION_SCORE_GAUGE.set(satisfaction_score)
+            
+            # Calculate query complexity score
+            if self._total_requests > 0:
+                # Simple complexity based on request patterns
+                complexity_score = min(1.0, self._total_requests / 1000.0)  # Normalize to 0-1
+                QUERY_COMPLEXITY_SCORE_HISTOGRAM.observe(complexity_score)
+            
+            # Update resource utilization metrics
+            self._update_resource_metrics()
+                
+        except Exception as e:
+            logger.debug("Could not update business intelligence metrics", extra={
+                "error_type": type(e).__name__,
+                "error_message": str(e)
+            })
+    
+    def _update_resource_metrics(self):
+        """Update resource utilization metrics."""
+        try:
+            import psutil
+            
+            # Update system resource metrics
+            process = psutil.Process()
+            
+            # Memory usage
+            memory_info = process.memory_info()
+            MEMORY_USAGE_GAUGE.set(memory_info.rss)  # RSS memory usage
+            
+            # CPU usage
+            cpu_percent = process.cpu_percent()
+            CPU_USAGE_GAUGE.set(cpu_percent)
+            
+            # Disk I/O operations
+            io_counters = process.io_counters()
+            DISK_IO_OPERATIONS_COUNTER.increment(io_counters.read_count + io_counters.write_count)
+            
+            # Network bandwidth (approximate)
+            net_io = psutil.net_io_counters()
+            NETWORK_BANDWIDTH_GAUGE.set(net_io.bytes_sent + net_io.bytes_recv)
+            
+            # Application resource metrics
+            # Active connections (approximate based on pending operations)
+            ACTIVE_CONNECTIONS_TOTAL_GAUGE.set(len(self._pending_operations))
+            
+            # Thread pool size (approximate)
+            import threading
+            THREAD_POOL_SIZE_GAUGE.set(threading.active_count())
+            
+            # Queue depth (approximate based on pending operations)
+            QUEUE_DEPTH_GAUGE.set(len(self._pending_operations))
+            
+        except ImportError:
+            # psutil not available, skip resource monitoring
+            pass
+        except Exception as e:
+            logger.debug("Could not update resource metrics", extra={
+                "error_type": type(e).__name__,
+                "error_message": str(e)
+            })
+                
+        except Exception as e:
+            logger.debug("Could not update business intelligence metrics", extra={
+                "error_type": type(e).__name__,
+                "error_message": str(e)
+            })
+    
     async def _tombstone_cleanup_loop(self):
         """Background task that purges tombstones at regular intervals."""
         while True:
@@ -460,34 +655,65 @@ class Semantrix:
         
         # Use correlation ID for tracing
         op_id = operation_id or str(uuid.uuid4())
+        
+        # Increment request counter
+        REQUEST_COUNTER.increment()
+        
+        # Track business intelligence metrics
+        self._total_requests += 1
+        
         with with_correlation_id(op_id):
             logger.debug("Processing get request", extra={
                 "operation_id": op_id,
                 "prompt_length": len(prompt)
             })
             
-            # Check if the item is tombstoned first
-            if await self.cache_store.is_tombstoned(prompt):
-                logger.debug("Item is tombstoned", extra={
-                    "operation_id": op_id,
-                    "prompt_length": len(prompt)
-                })
-                return None
-                
-            # Check if we have an exact match first (fast path)
-            if exact_match := await self.cache_store.get(prompt):
-                logger.debug("Exact match found", extra={
-                    "operation_id": op_id,
-                    "response_length": len(exact_match)
-                })
-                self.metrics_logger.log_cache_hit("exact", prompt, operation_id=op_id)
-                return exact_match
-                
-            # If no exact match, try semantic search
-            logger.debug("No exact match, attempting semantic search", extra={
-                "operation_id": op_id
-            })
-            return await self._get_semantic(prompt, op_id)
+            # Use timer for request duration
+            with REQUEST_DURATION_HISTOGRAM.time() as timer:
+                # Track response time for business intelligence
+                start_time = time.time()
+                try:
+                    # Check if the item is tombstoned first
+                    if await self.cache_store.is_tombstoned(prompt):
+                        logger.debug("Item is tombstoned", extra={
+                            "operation_id": op_id,
+                            "prompt_length": len(prompt)
+                        })
+                        return None
+                        
+                    # Check if we have an exact match first (fast path)
+                    if exact_match := await self.cache_store.get(prompt):
+                        logger.debug("Exact match found", extra={
+                            "operation_id": op_id,
+                            "response_length": len(exact_match)
+                        })
+                        CACHE_HIT_COUNTER.increment()
+                        self._total_hits += 1
+                        self.metrics_logger.log_cache_hit("exact", prompt, operation_id=op_id)
+                        return exact_match
+                    
+                    # If no exact match, try semantic search
+                    logger.debug("No exact match, attempting semantic search", extra={
+                        "operation_id": op_id
+                    })
+                    return await self._get_semantic(prompt, op_id)
+                    
+                except Exception as e:
+                    ERROR_COUNTER.increment()
+                    logger.error("Error during get operation", extra={
+                        "operation_id": op_id,
+                        "error_type": type(e).__name__,
+                        "error_message": str(e)
+                    }, exc_info=True)
+                    raise
+                finally:
+                    # Track response time for business intelligence
+                    end_time = time.time()
+                    response_time = end_time - start_time
+                    self._response_times.append(response_time)
+                    # Keep only last 1000 response times to prevent memory bloat
+                    if len(self._response_times) > 1000:
+                        self._response_times = self._response_times[-1000:]
 
     @retry(max_retries=3, initial_delay=0.5, backoff_factor=2)
     async def _get_semantic(self, prompt: str, operation_id: str) -> Optional[str]:
@@ -500,6 +726,9 @@ class Semantrix:
             # 2. Semantic search (if vector store is available)
             if hasattr(self.embedder, 'encode') and hasattr(self.vector_store, 'search'):
                 try:
+                    # Increment semantic search counter
+                    SEMANTIC_SEARCH_COUNTER.increment()
+                    
                     # Log semantic search start
                     self.metrics_logger.log_operation_start(
                         "semantic_search",
@@ -507,20 +736,26 @@ class Semantrix:
                         prompt_length=len(prompt)
                     )
                     
-                    start_time = time.time()
-                    
-                    # Use async embedding
-                    embedding = await self.embedder.encode(prompt)
-                    
-                    # Search in vector store
-                    results = await self.vector_store.search(embedding, k=3)
-                    
-                    duration = time.time() - start_time
+                    # Use timer for semantic search duration
+                    with SEMANTIC_SEARCH_DURATION_HISTOGRAM.time() as timer:
+                        # Increment embedding generation counter
+                        EMBEDDING_GENERATION_COUNTER.increment()
+                        
+                        # Use timer for embedding duration
+                        with EMBEDDING_DURATION_HISTOGRAM.time() as embedding_timer:
+                            # Use async embedding
+                            embedding = await self.embedder.encode(prompt)
+                        
+                        # Increment vector store operations counter
+                        VECTOR_STORE_OPERATIONS_COUNTER.increment()
+                        
+                        # Search in vector store
+                        results = await self.vector_store.search(embedding, k=3)
                     
                     # Log semantic search end
                     self.metrics_logger.log_operation_end(
                         "semantic_search",
-                        duration,
+                        timer.duration,
                         True,
                         operation_id=operation_id,
                         results_count=len(results)
@@ -528,7 +763,7 @@ class Semantrix:
                     
                     logger.debug("Semantic search completed", extra={
                         "operation_id": operation_id,
-                        "duration_seconds": duration,
+                        "duration_seconds": timer.duration,
                         "results_count": len(results)
                     })
                     
@@ -543,6 +778,13 @@ class Semantrix:
                                     "score": result.score,
                                     "similarity_threshold": self.similarity_threshold
                                 })
+                                CACHE_HIT_COUNTER.increment()
+                                self._total_hits += 1
+                                # Track similarity score for business intelligence
+                                self._similarity_scores.append(result.score)
+                                if len(self._similarity_scores) > 1000:
+                                    self._similarity_scores = self._similarity_scores[-1000:]
+                                
                                 self.metrics_logger.log_cache_hit("semantic", result.document, 
                                                                  operation_id=operation_id, score=result.score)
                                 return await self.cache_store.get(result.document)
@@ -551,9 +793,12 @@ class Semantrix:
                         "operation_id": operation_id,
                         "results_count": len(results)
                     })
+                    CACHE_MISS_COUNTER.increment()
+                    self._total_misses += 1
                     self.metrics_logger.log_cache_miss("semantic", prompt, operation_id=operation_id)
                     
                 except Exception as e:
+                    ERROR_COUNTER.increment()
                     logger.error("Error during semantic search", extra={
                         "operation_id": operation_id,
                         "error_type": type(e).__name__,
@@ -579,7 +824,21 @@ class Semantrix:
         validate_response(response)
         validate_operation_id(operation_id)
 
-        return await self._set_with_retry(prompt, response, operation_id)
+        # Increment request counter
+        REQUEST_COUNTER.increment()
+        
+        # Use timer for request duration
+        with REQUEST_DURATION_HISTOGRAM.time() as timer:
+            try:
+                return await self._set_with_retry(prompt, response, operation_id)
+            except Exception as e:
+                ERROR_COUNTER.increment()
+                logger.error("Error during set operation", extra={
+                    "operation_id": operation_id,
+                    "error_type": type(e).__name__,
+                    "error_message": str(e)
+                }, exc_info=True)
+                raise
 
     async def delete(self, prompt: str, mode: DeletionMode = DeletionMode.DIRECT, operation_id: Optional[str] = None) -> bool:
         """
@@ -614,7 +873,21 @@ class Semantrix:
         validate_prompt(prompt)
         validate_operation_id(operation_id)
         
-        return await self._tombstone_with_retry(prompt, operation_id)
+        # Increment tombstone operations counter
+        TOMBSTONE_OPERATIONS_COUNTER.increment()
+        
+        # Use timer for request duration
+        with REQUEST_DURATION_HISTOGRAM.time() as timer:
+            try:
+                return await self._tombstone_with_retry(prompt, operation_id)
+            except Exception as e:
+                ERROR_COUNTER.increment()
+                logger.error("Error during tombstone operation", extra={
+                    "operation_id": operation_id,
+                    "error_type": type(e).__name__,
+                    "error_message": str(e)
+                }, exc_info=True)
+                raise
 
     async def purge_tombstones(self, operation_id: Optional[str] = None) -> int:
         """
@@ -632,8 +905,16 @@ class Semantrix:
 
     @retry(max_retries=3, initial_delay=0.5, backoff_factor=2)
     async def _set_with_retry(self, prompt: str, response: str, operation_id: Optional[str] = None) -> None:
-        # Generate embedding for the prompt
-        embedding = await self.embedder.encode(prompt)
+        # Increment embedding generation counter
+        EMBEDDING_GENERATION_COUNTER.increment()
+        
+        # Use timer for embedding duration
+        with EMBEDDING_DURATION_HISTOGRAM.time() as embedding_timer:
+            # Generate embedding for the prompt
+            embedding = await self.embedder.encode(prompt)
+        
+        # Increment vector store operations counter
+        VECTOR_STORE_OPERATIONS_COUNTER.increment()
         
         # Add to vector store and get vector IDs
         vector_ids = await self.vector_store.add(

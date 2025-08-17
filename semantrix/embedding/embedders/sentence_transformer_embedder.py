@@ -5,12 +5,19 @@ This module provides an async-compatible wrapper around sentence-transformers fo
 """
 
 import asyncio
+import time
 from typing import List, Optional
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from semantrix.embedding.base import BaseEmbedder
+from semantrix.utils.metrics import (
+    SENTENCE_TRANSFORMER_OPERATIONS_COUNTER, SENTENCE_TRANSFORMER_LATENCY_HISTOGRAM,
+    SENTENCE_TRANSFORMER_MODEL_LOADING_TIME_HISTOGRAM, SENTENCE_TRANSFORMER_INFERENCE_SPEED_HISTOGRAM,
+    SENTENCE_TRANSFORMER_MEMORY_EFFICIENCY_GAUGE, EMBEDDING_MODEL_LATENCY_HISTOGRAM,
+    EMBEDDING_MODEL_MEMORY_USAGE_GAUGE, EMBEDDING_MODEL_THROUGHPUT_HISTOGRAM
+)
 
 
 class SentenceTransformerEmbedder(BaseEmbedder):
@@ -53,13 +60,38 @@ class SentenceTransformerEmbedder(BaseEmbedder):
         Returns:
             Encoded vector as a numpy array with shape (dimension,)
         """
-        # Use a thread pool to run the CPU-bound encoding
-        loop = asyncio.get_running_loop()
-        async with self._model_lock:
-            return await loop.run_in_executor(
-                None,  # Use default executor
-                lambda: self.model.encode(text, convert_to_numpy=True)
-            )
+        # Increment sentence transformer operations counter
+        SENTENCE_TRANSFORMER_OPERATIONS_COUNTER.increment()
+        
+        # Use timer for sentence transformer latency
+        with SENTENCE_TRANSFORMER_LATENCY_HISTOGRAM.time() as timer:
+            # Use timer for embedding model latency
+            with EMBEDDING_MODEL_LATENCY_HISTOGRAM.time() as model_timer:
+                # Use a thread pool to run the CPU-bound encoding
+                loop = asyncio.get_running_loop()
+                async with self._model_lock:
+                    start_time = time.time()
+                    result = await loop.run_in_executor(
+                        None,  # Use default executor
+                        lambda: self.model.encode(text, convert_to_numpy=True)
+                    )
+                    end_time = time.time()
+                    
+                    # Calculate throughput (embeddings per second)
+                    duration = end_time - start_time
+                    if duration > 0:
+                        throughput = 1.0 / duration
+                        EMBEDDING_MODEL_THROUGHPUT_HISTOGRAM.observe(throughput)
+                        SENTENCE_TRANSFORMER_INFERENCE_SPEED_HISTOGRAM.observe(throughput)
+                    
+                    # Update memory efficiency metric (approximate)
+                    if hasattr(self.model, 'get_sentence_embedding_dimension'):
+                        dimension = self.model.get_sentence_embedding_dimension()
+                        # Rough estimate of memory usage per embedding
+                        memory_per_embedding = dimension * 4  # float32
+                        SENTENCE_TRANSFORMER_MEMORY_EFFICIENCY_GAUGE.set(memory_per_embedding)
+                    
+                    return result
     
     async def batch_encode(self, texts: List[str]) -> List[np.ndarray]:
         """

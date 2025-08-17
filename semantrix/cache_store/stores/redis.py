@@ -13,6 +13,10 @@ from redis.exceptions import RedisError
 from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy, DeletionMode
 from semantrix.exceptions import CacheOperationError, ValidationError
 from semantrix.utils.logging import get_logger
+from semantrix.utils.metrics import (
+    REDIS_OPERATIONS_COUNTER, REDIS_OPERATION_DURATION_HISTOGRAM,
+    REDIS_CONNECTION_POOL_GAUGE, REDIS_MEMORY_USAGE_GAUGE
+)
 
 # Configure logging
 logger = get_logger(__name__)
@@ -36,6 +40,39 @@ class RedisCacheStore(BaseCacheStore):
 
     def _get_key(self, prompt: str) -> str:
         return f"{self.key_prefix}{hash(prompt)}"
+    
+    async def _update_redis_metrics(self):
+        """Update Redis-specific metrics like connection pool and memory usage."""
+        try:
+            # Update connection pool metrics if available
+            if hasattr(self.redis, 'connection_pool'):
+                pool = self.redis.connection_pool
+                if hasattr(pool, '_created_connections'):
+                    REDIS_CONNECTION_POOL_GAUGE.set(pool._created_connections)
+            
+            # Update memory usage if INFO command is available
+            try:
+                if hasattr(self.redis, 'info'):
+                    info = self.redis.info('memory')
+                    if 'used_memory' in info:
+                        REDIS_MEMORY_USAGE_GAUGE.set(info['used_memory'])
+                elif hasattr(self.redis, 'execute_command'):
+                    # For async Redis clients
+                    info = await self.redis.execute_command('INFO', 'memory')
+                    if 'used_memory:' in info:
+                        memory_line = [line for line in info.split('\n') if 'used_memory:' in line][0]
+                        memory_usage = int(memory_line.split(':')[1])
+                        REDIS_MEMORY_USAGE_GAUGE.set(memory_usage)
+            except Exception as e:
+                logger.debug("Could not update Redis memory metrics", extra={
+                    "error_type": type(e).__name__,
+                    "error_message": str(e)
+                })
+        except Exception as e:
+            logger.debug("Could not update Redis metrics", extra={
+                "error_type": type(e).__name__,
+                "error_message": str(e)
+            })
 
     async def get_exact(self, prompt: str) -> Optional[str]:
         """
@@ -48,48 +85,54 @@ class RedisCacheStore(BaseCacheStore):
             The cached response if found, None otherwise.
         """
         key = self._get_key(prompt)
-        try:
-            if hasattr(self.redis, 'get') and callable(getattr(self.redis, 'get')):
-                # Handle both sync and async Redis clients
-                if hasattr(self.redis, 'execute_command'):  # aioredis
-                    value = await self.redis.get(key)
-                else:  # redis-py
-                    value = self.redis.get(key)
-                    if hasattr(value, 'decode'):
-                        value = value.decode('utf-8')
-                
-                if value is not None:
-                    try:
-                        data = json.loads(value)
-                        # Check if item is tombstoned
-                        if data.get('tombstoned', False):
-                            logger.debug("Cache hit (tombstoned)", extra={
+        
+        # Increment Redis operations counter
+        REDIS_OPERATIONS_COUNTER.increment()
+        
+        # Use timer for Redis operation duration
+        with REDIS_OPERATION_DURATION_HISTOGRAM.time() as timer:
+            try:
+                if hasattr(self.redis, 'get') and callable(getattr(self.redis, 'get')):
+                    # Handle both sync and async Redis clients
+                    if hasattr(self.redis, 'execute_command'):  # aioredis
+                        value = await self.redis.get(key)
+                    else:  # redis-py
+                        value = self.redis.get(key)
+                        if hasattr(value, 'decode'):
+                            value = value.decode('utf-8')
+                    
+                    if value is not None:
+                        try:
+                            data = json.loads(value)
+                            # Check if item is tombstoned
+                            if data.get('tombstoned', False):
+                                logger.debug("Cache hit (tombstoned)", extra={
+                                    "cache_key": key,
+                                    "cache_type": "redis"
+                                })
+                                return None
+                            logger.debug("Cache hit", extra={
                                 "cache_key": key,
-                                "cache_type": "redis"
+                                "cache_type": "redis",
+                                "response_length": len(data.get('response', ''))
                             })
-                            return None
-                        logger.debug("Cache hit", extra={
-                            "cache_key": key,
-                            "cache_type": "redis",
-                            "response_length": len(data.get('response', ''))
-                        })
-                        return data.get('response')
-                    except json.JSONDecodeError as e:
-                        logger.error("Failed to decode JSON from cache", extra={
-                            "cache_key": key,
-                            "cache_type": "redis",
-                            "error_type": "JSONDecodeError",
-                            "error_message": str(e)
-                        })
-                        raise ValidationError(f"Corrupt data in cache for key {key}.", original_exception=e) from e
-        except RedisError as e:
-            logger.error("Redis error getting value", extra={
-                "cache_key": key,
-                "cache_type": "redis",
-                "error_type": "RedisError",
-                "error_message": str(e)
-            })
-            raise CacheOperationError(f"Failed to get value from Redis for key {key}", original_exception=e) from e
+                            return data.get('response')
+                        except json.JSONDecodeError as e:
+                            logger.error("Failed to decode JSON from cache", extra={
+                                "cache_key": key,
+                                "cache_type": "redis",
+                                "error_type": "JSONDecodeError",
+                                "error_message": str(e)
+                            })
+                            raise ValidationError(f"Corrupt data in cache for key {key}.", original_exception=e) from e
+            except RedisError as e:
+                logger.error("Redis error getting value", extra={
+                    "cache_key": key,
+                    "cache_type": "redis",
+                    "error_type": "RedisError",
+                    "error_message": str(e)
+                })
+                raise CacheOperationError(f"Failed to get value from Redis for key {key}", original_exception=e) from e
         return None
 
     async def add(self, prompt: str, response: str) -> None:
@@ -101,20 +144,29 @@ class RedisCacheStore(BaseCacheStore):
             response: The response to cache.
         """
         key = self._get_key(prompt)
-        data = {
-            'response': response,
-            'timestamp': time.time(),
-            'prompt_hash': hash(prompt)
-        }
-        try:
-            if hasattr(self.redis, 'set'):
-                if hasattr(self.redis, 'execute_command'):  # aioredis
-                    await self.redis.set(key, json.dumps(data))
-                else:  # redis-py
-                    self.redis.set(key, json.dumps(data))
-        except RedisError as e:
-            logger.error(f"Redis error adding value for key {key}: {e}")
-            raise CacheOperationError(f"Failed to add value to Redis for key {key}", original_exception=e) from e
+        
+        # Increment Redis operations counter
+        REDIS_OPERATIONS_COUNTER.increment()
+        
+        # Use timer for Redis operation duration
+        with REDIS_OPERATION_DURATION_HISTOGRAM.time() as timer:
+            data = {
+                'response': response,
+                'timestamp': time.time(),
+                'prompt_hash': hash(prompt)
+            }
+            try:
+                if hasattr(self.redis, 'set'):
+                    if hasattr(self.redis, 'execute_command'):  # aioredis
+                        await self.redis.set(key, json.dumps(data))
+                    else:  # redis-py
+                        self.redis.set(key, json.dumps(data))
+                    
+                    # Update Redis metrics after successful operation
+                    await self._update_redis_metrics()
+            except RedisError as e:
+                logger.error(f"Redis error adding value for key {key}: {e}")
+                raise CacheOperationError(f"Failed to add value to Redis for key {key}", original_exception=e) from e
 
     async def enforce_limits(self, resource_limits: Any) -> None:
         """

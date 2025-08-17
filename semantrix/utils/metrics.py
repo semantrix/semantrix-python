@@ -527,11 +527,172 @@ def log_metrics(level: str = "INFO"):
     get_metrics_registry().log_metrics(level)
 
 
-# Pre-defined metrics for common operations
-REQUEST_COUNTER = counter("requests_total", "Total number of requests")
-ERROR_COUNTER = counter("errors_total", "Total number of errors")
-CACHE_HIT_COUNTER = counter("cache_hits_total", "Total number of cache hits")
-CACHE_MISS_COUNTER = counter("cache_misses_total", "Total number of cache misses")
-ACTIVE_CONNECTIONS_GAUGE = gauge("active_connections", "Number of active connections")
-REQUEST_DURATION_HISTOGRAM = histogram("request_duration_seconds", "Request duration distribution")
-CACHE_OPERATION_DURATION_HISTOGRAM = histogram("cache_operation_duration_seconds", "Cache operation duration distribution")
+# Pre-defined metrics for common operations (Prometheus-compatible naming)
+REQUEST_COUNTER = counter("semantrix_requests_total", "Total number of requests")
+ERROR_COUNTER = counter("semantrix_errors_total", "Total number of errors")
+CACHE_HIT_COUNTER = counter("semantrix_cache_hits_total", "Total number of cache hits")
+CACHE_MISS_COUNTER = counter("semantrix_cache_misses_total", "Total number of cache misses")
+ACTIVE_CONNECTIONS_GAUGE = gauge("semantrix_active_connections", "Number of active connections")
+REQUEST_DURATION_HISTOGRAM = histogram("semantrix_request_duration_seconds", "Request duration distribution")
+CACHE_OPERATION_DURATION_HISTOGRAM = histogram("semantrix_cache_operation_duration_seconds", "Cache operation duration distribution")
+
+# Additional metrics for better observability
+SEMANTIC_SEARCH_COUNTER = counter("semantrix_semantic_searches_total", "Total number of semantic searches")
+SEMANTIC_SEARCH_DURATION_HISTOGRAM = histogram("semantrix_semantic_search_duration_seconds", "Semantic search duration distribution")
+EMBEDDING_GENERATION_COUNTER = counter("semantrix_embeddings_generated_total", "Total number of embeddings generated")
+EMBEDDING_DURATION_HISTOGRAM = histogram("semantrix_embedding_duration_seconds", "Embedding generation duration distribution")
+VECTOR_STORE_OPERATIONS_COUNTER = counter("semantrix_vector_store_operations_total", "Total number of vector store operations")
+TOMBSTONE_OPERATIONS_COUNTER = counter("semantrix_tombstone_operations_total", "Total number of tombstone operations")
+
+# Cache Store-Specific Metrics
+REDIS_OPERATIONS_COUNTER = counter("semantrix_redis_operations_total", "Total number of Redis operations")
+REDIS_OPERATION_DURATION_HISTOGRAM = histogram("semantrix_redis_operation_duration_seconds", "Redis operation duration distribution")
+REDIS_CONNECTION_POOL_GAUGE = gauge("semantrix_redis_connection_pool_size", "Redis connection pool size")
+REDIS_MEMORY_USAGE_GAUGE = gauge("semantrix_redis_memory_usage_bytes", "Redis memory usage in bytes")
+
+MONGODB_QUERIES_COUNTER = counter("semantrix_mongodb_queries_total", "Total number of MongoDB queries")
+MONGODB_QUERY_DURATION_HISTOGRAM = histogram("semantrix_mongodb_query_duration_seconds", "MongoDB query duration distribution")
+MONGODB_CONNECTIONS_ACTIVE_GAUGE = gauge("semantrix_mongodb_connections_active", "Active MongoDB connections")
+MONGODB_COLLECTION_SIZE_GAUGE = gauge("semantrix_mongodb_collection_size_bytes", "MongoDB collection size in bytes")
+
+POSTGRESQL_OPERATIONS_COUNTER = counter("semantrix_postgresql_operations_total", "Total number of PostgreSQL operations")
+POSTGRESQL_OPERATION_DURATION_HISTOGRAM = histogram("semantrix_postgresql_operation_duration_seconds", "PostgreSQL operation duration distribution")
+POSTGRESQL_CONNECTIONS_ACTIVE_GAUGE = gauge("semantrix_postgresql_connections_active", "Active PostgreSQL connections")
+POSTGRESQL_CONNECTION_POOL_UTILIZATION_GAUGE = gauge("semantrix_postgresql_connection_pool_utilization", "PostgreSQL connection pool utilization percentage")
+
+DYNAMODB_OPERATIONS_COUNTER = counter("semantrix_dynamodb_operations_total", "Total number of DynamoDB operations")
+DYNAMODB_OPERATION_DURATION_HISTOGRAM = histogram("semantrix_dynamodb_operation_duration_seconds", "DynamoDB operation duration distribution")
+DYNAMODB_THROTTLED_REQUESTS_COUNTER = counter("semantrix_dynamodb_throttled_requests_total", "Total number of throttled DynamoDB requests")
+DYNAMODB_CONSUMED_CAPACITY_GAUGE = gauge("semantrix_dynamodb_consumed_capacity", "DynamoDB consumed capacity units")
+
+ELASTICACHE_OPERATIONS_COUNTER = counter("semantrix_elasticache_operations_total", "Total number of ElastiCache operations")
+ELASTICACHE_OPERATION_DURATION_HISTOGRAM = histogram("semantrix_elasticache_operation_duration_seconds", "ElastiCache operation duration distribution")
+ELASTICACHE_NODE_HEALTH_GAUGE = gauge("semantrix_elasticache_node_health", "ElastiCache node health status")
+ELASTICACHE_REPLICATION_LAG_GAUGE = gauge("semantrix_elasticache_replication_lag_seconds", "ElastiCache replication lag in seconds")
+
+MEMCACHED_OPERATIONS_COUNTER = counter("semantrix_memcached_operations_total", "Total number of Memcached operations")
+MEMCACHED_OPERATION_DURATION_HISTOGRAM = histogram("semantrix_memcached_operation_duration_seconds", "Memcached operation duration distribution")
+MEMCACHED_MEMORY_USAGE_GAUGE = gauge("semantrix_memcached_memory_usage_bytes", "Memcached memory usage in bytes")
+MEMCACHED_EVICTIONS_COUNTER = counter("semantrix_memcached_evictions_total", "Total number of Memcached evictions")
+
+SQLITE_OPERATIONS_COUNTER = counter("semantrix_sqlite_operations_total", "Total number of SQLite operations")
+SQLITE_OPERATION_DURATION_HISTOGRAM = histogram("semantrix_sqlite_operation_duration_seconds", "SQLite operation duration distribution")
+SQLITE_DATABASE_SIZE_GAUGE = gauge("semantrix_sqlite_database_size_bytes", "SQLite database size in bytes")
+SQLITE_WAL_SIZE_GAUGE = gauge("semantrix_sqlite_wal_size_bytes", "SQLite WAL file size in bytes")
+
+GOOGLE_MEMORYSTORE_OPERATIONS_COUNTER = counter("semantrix_google_memorystore_operations_total", "Total number of Google Memorystore operations")
+GOOGLE_MEMORYSTORE_OPERATION_DURATION_HISTOGRAM = histogram("semantrix_google_memorystore_operation_duration_seconds", "Google Memorystore operation duration distribution")
+GOOGLE_MEMORYSTORE_INSTANCE_HEALTH_GAUGE = gauge("semantrix_google_memorystore_instance_health", "Google Memorystore instance health status")
+GOOGLE_MEMORYSTORE_MEMORY_USAGE_GAUGE = gauge("semantrix_google_memorystore_memory_usage_bytes", "Google Memorystore memory usage in bytes")
+
+# Vector Store Performance Metrics
+VECTOR_SEARCH_LATENCY_HISTOGRAM = histogram("semantrix_vector_search_latency_seconds", "Vector search latency distribution")
+VECTOR_INDEX_SIZE_GAUGE = gauge("semantrix_vector_index_size", "Vector index size in number of vectors")
+VECTOR_SEARCH_RESULTS_COUNT_HISTOGRAM = histogram("semantrix_vector_search_results_count", "Number of results returned by vector search")
+VECTOR_SEARCH_ACCURACY_SCORE_HISTOGRAM = histogram("semantrix_vector_search_accuracy_score", "Vector search accuracy score distribution")
+
+# Vector Store-Specific Metrics
+FAISS_OPERATIONS_COUNTER = counter("semantrix_faiss_operations_total", "Total number of FAISS operations")
+FAISS_OPERATION_DURATION_HISTOGRAM = histogram("semantrix_faiss_operation_duration_seconds", "FAISS operation duration distribution")
+FAISS_INDEX_BUILD_TIME_HISTOGRAM = histogram("semantrix_faiss_index_build_time_seconds", "FAISS index build time distribution")
+FAISS_MEMORY_USAGE_GAUGE = gauge("semantrix_faiss_memory_usage_bytes", "FAISS memory usage in bytes")
+FAISS_SEARCH_COMPLEXITY_GAUGE = gauge("semantrix_faiss_search_complexity", "FAISS search complexity metric")
+
+PINECONE_OPERATIONS_COUNTER = counter("semantrix_pinecone_operations_total", "Total number of Pinecone operations")
+PINECONE_OPERATION_DURATION_HISTOGRAM = histogram("semantrix_pinecone_operation_duration_seconds", "Pinecone operation duration distribution")
+PINECONE_API_CALL_LATENCY_HISTOGRAM = histogram("semantrix_pinecone_api_call_latency_seconds", "Pinecone API call latency distribution")
+PINECONE_INDEX_OPERATIONS_COUNTER = counter("semantrix_pinecone_index_operations_total", "Total number of Pinecone index operations")
+PINECONE_NAMESPACE_METRICS_GAUGE = gauge("semantrix_pinecone_namespace_metrics", "Pinecone namespace metrics")
+
+QDRANT_OPERATIONS_COUNTER = counter("semantrix_qdrant_operations_total", "Total number of Qdrant operations")
+QDRANT_OPERATION_DURATION_HISTOGRAM = histogram("semantrix_qdrant_operation_duration_seconds", "Qdrant operation duration distribution")
+QDRANT_COLLECTION_SIZE_GAUGE = gauge("semantrix_qdrant_collection_size", "Qdrant collection size in number of vectors")
+QDRANT_SHARD_DISTRIBUTION_GAUGE = gauge("semantrix_qdrant_shard_distribution", "Qdrant shard distribution metric")
+QDRANT_REPLICATION_METRICS_GAUGE = gauge("semantrix_qdrant_replication_metrics", "Qdrant replication metrics")
+
+MILVUS_OPERATIONS_COUNTER = counter("semantrix_milvus_operations_total", "Total number of Milvus operations")
+MILVUS_OPERATION_DURATION_HISTOGRAM = histogram("semantrix_milvus_operation_duration_seconds", "Milvus operation duration distribution")
+MILVUS_COLLECTION_STATISTICS_GAUGE = gauge("semantrix_milvus_collection_statistics", "Milvus collection statistics")
+MILVUS_QUERY_PERFORMANCE_HISTOGRAM = histogram("semantrix_milvus_query_performance_seconds", "Milvus query performance distribution")
+MILVUS_RESOURCE_USAGE_GAUGE = gauge("semantrix_milvus_resource_usage", "Milvus resource usage metrics")
+
+CHROMA_OPERATIONS_COUNTER = counter("semantrix_chroma_operations_total", "Total number of Chroma operations")
+CHROMA_OPERATION_DURATION_HISTOGRAM = histogram("semantrix_chroma_operation_duration_seconds", "Chroma operation duration distribution")
+CHROMA_COLLECTION_SIZE_GAUGE = gauge("semantrix_chroma_collection_size", "Chroma collection size in number of vectors")
+CHROMA_EMBEDDING_STORE_SIZE_GAUGE = gauge("semantrix_chroma_embedding_store_size_bytes", "Chroma embedding store size in bytes")
+
+PGVECTOR_OPERATIONS_COUNTER = counter("semantrix_pgvector_operations_total", "Total number of pgvector operations")
+PGVECTOR_OPERATION_DURATION_HISTOGRAM = histogram("semantrix_pgvector_operation_duration_seconds", "pgvector operation duration distribution")
+PGVECTOR_TABLE_SIZE_GAUGE = gauge("semantrix_pgvector_table_size_bytes", "pgvector table size in bytes")
+PGVECTOR_INDEX_USAGE_GAUGE = gauge("semantrix_pgvector_index_usage", "pgvector index usage statistics")
+
+VECTOR_REDIS_OPERATIONS_COUNTER = counter("semantrix_vector_redis_operations_total", "Total number of Vector Redis operations")
+VECTOR_REDIS_OPERATION_DURATION_HISTOGRAM = histogram("semantrix_vector_redis_operation_duration_seconds", "Vector Redis operation duration distribution")
+VECTOR_REDIS_INDEX_SIZE_GAUGE = gauge("semantrix_vector_redis_index_size", "Vector Redis index size in number of vectors")
+VECTOR_REDIS_MEMORY_USAGE_GAUGE = gauge("semantrix_vector_redis_memory_usage_bytes", "Vector Redis memory usage in bytes")
+
+# Embedding Model Performance Metrics
+EMBEDDING_MODEL_LATENCY_HISTOGRAM = histogram("semantrix_embedding_model_latency_seconds", "Embedding model latency distribution")
+EMBEDDING_MODEL_MEMORY_USAGE_GAUGE = gauge("semantrix_embedding_model_memory_usage_bytes", "Embedding model memory usage in bytes")
+EMBEDDING_MODEL_THROUGHPUT_HISTOGRAM = histogram("semantrix_embedding_model_throughput_embeddings_per_second", "Embedding model throughput in embeddings per second")
+EMBEDDING_MODEL_ACCURACY_SCORE_HISTOGRAM = histogram("semantrix_embedding_model_accuracy_score", "Embedding model accuracy score distribution")
+
+# Embedding Model-Specific Metrics
+OPENAI_EMBEDDING_OPERATIONS_COUNTER = counter("semantrix_openai_embedding_operations_total", "Total number of OpenAI embedding operations")
+OPENAI_EMBEDDING_LATENCY_HISTOGRAM = histogram("semantrix_openai_embedding_latency_seconds", "OpenAI embedding latency distribution")
+OPENAI_API_RATE_LIMITS_GAUGE = gauge("semantrix_openai_api_rate_limits", "OpenAI API rate limit status")
+OPENAI_TOKEN_USAGE_COUNTER = counter("semantrix_openai_token_usage_total", "Total OpenAI token usage")
+OPENAI_MODEL_VERSION_GAUGE = gauge("semantrix_openai_model_version", "OpenAI model version tracking")
+
+COHERE_EMBEDDING_OPERATIONS_COUNTER = counter("semantrix_cohere_embedding_operations_total", "Total number of Cohere embedding operations")
+COHERE_EMBEDDING_LATENCY_HISTOGRAM = histogram("semantrix_cohere_embedding_latency_seconds", "Cohere embedding latency distribution")
+COHERE_API_RESPONSE_TIMES_HISTOGRAM = histogram("semantrix_cohere_api_response_times_seconds", "Cohere API response times distribution")
+COHERE_MODEL_PERFORMANCE_GAUGE = gauge("semantrix_cohere_model_performance", "Cohere model performance metrics")
+
+SENTENCE_TRANSFORMER_OPERATIONS_COUNTER = counter("semantrix_sentence_transformer_operations_total", "Total number of Sentence Transformer operations")
+SENTENCE_TRANSFORMER_LATENCY_HISTOGRAM = histogram("semantrix_sentence_transformer_latency_seconds", "Sentence Transformer latency distribution")
+SENTENCE_TRANSFORMER_MODEL_LOADING_TIME_HISTOGRAM = histogram("semantrix_sentence_transformer_model_loading_time_seconds", "Sentence Transformer model loading time distribution")
+SENTENCE_TRANSFORMER_INFERENCE_SPEED_HISTOGRAM = histogram("semantrix_sentence_transformer_inference_speed_embeddings_per_second", "Sentence Transformer inference speed distribution")
+SENTENCE_TRANSFORMER_MEMORY_EFFICIENCY_GAUGE = gauge("semantrix_sentence_transformer_memory_efficiency", "Sentence Transformer memory efficiency metric")
+
+ONNX_EMBEDDING_OPERATIONS_COUNTER = counter("semantrix_onnx_embedding_operations_total", "Total number of ONNX embedding operations")
+ONNX_EMBEDDING_LATENCY_HISTOGRAM = histogram("semantrix_onnx_embedding_latency_seconds", "ONNX embedding latency distribution")
+ONNX_MODEL_OPTIMIZATION_METRICS_GAUGE = gauge("semantrix_onnx_model_optimization_metrics", "ONNX model optimization metrics")
+ONNX_INFERENCE_LATENCY_HISTOGRAM = histogram("semantrix_onnx_inference_latency_seconds", "ONNX inference latency distribution")
+ONNX_HARDWARE_UTILIZATION_GAUGE = gauge("semantrix_onnx_hardware_utilization", "ONNX hardware utilization metrics")
+
+MISTRAL_EMBEDDING_OPERATIONS_COUNTER = counter("semantrix_mistral_embedding_operations_total", "Total number of Mistral embedding operations")
+MISTRAL_EMBEDDING_LATENCY_HISTOGRAM = histogram("semantrix_mistral_embedding_latency_seconds", "Mistral embedding latency distribution")
+MISTRAL_MODEL_PERFORMANCE_GAUGE = gauge("semantrix_mistral_model_performance", "Mistral model performance metrics")
+
+OLLAMA_EMBEDDING_OPERATIONS_COUNTER = counter("semantrix_ollama_embedding_operations_total", "Total number of Ollama embedding operations")
+OLLAMA_EMBEDDING_LATENCY_HISTOGRAM = histogram("semantrix_ollama_embedding_latency_seconds", "Ollama embedding latency distribution")
+OLLAMA_LOCAL_MODEL_PERFORMANCE_GAUGE = gauge("semantrix_ollama_local_model_performance", "Ollama local model performance metrics")
+
+LANGCHAIN_EMBEDDING_OPERATIONS_COUNTER = counter("semantrix_langchain_embedding_operations_total", "Total number of LangChain embedding operations")
+LANGCHAIN_EMBEDDING_LATENCY_HISTOGRAM = histogram("semantrix_langchain_embedding_latency_seconds", "LangChain embedding latency distribution")
+LANGCHAIN_INTEGRATION_PERFORMANCE_GAUGE = gauge("semantrix_langchain_integration_performance", "LangChain integration performance metrics")
+
+# Business Intelligence Metrics
+CACHE_HIT_RATE_GAUGE = gauge("semantrix_cache_hit_rate_percentage", "Cache hit rate as a percentage")
+CACHE_EFFECTIVENESS_SCORE_GAUGE = gauge("semantrix_cache_effectiveness_score", "Cache effectiveness score (0-1)")
+SEMANTIC_SIMILARITY_DISTRIBUTION_HISTOGRAM = histogram("semantrix_semantic_similarity_distribution", "Distribution of semantic similarity scores")
+CACHE_EVICTION_REASONS_COUNTER = counter("semantrix_cache_eviction_reasons_total", "Total cache evictions by reason")
+
+# User Experience Metrics
+RESPONSE_TIME_PERCENTILE_95_HISTOGRAM = histogram("semantrix_response_time_percentile_95_seconds", "95th percentile response time distribution")
+RESPONSE_TIME_PERCENTILE_99_HISTOGRAM = histogram("semantrix_response_time_percentile_99_seconds", "99th percentile response time distribution")
+USER_SATISFACTION_SCORE_GAUGE = gauge("semantrix_user_satisfaction_score", "User satisfaction score (0-1)")
+QUERY_COMPLEXITY_SCORE_HISTOGRAM = histogram("semantrix_query_complexity_score", "Query complexity score distribution")
+
+# Resource Utilization Metrics
+MEMORY_USAGE_GAUGE = gauge("semantrix_memory_usage_bytes", "Memory usage in bytes")
+CPU_USAGE_GAUGE = gauge("semantrix_cpu_usage_percentage", "CPU usage percentage")
+DISK_IO_OPERATIONS_COUNTER = counter("semantrix_disk_io_operations_total", "Total disk I/O operations")
+NETWORK_BANDWIDTH_GAUGE = gauge("semantrix_network_bandwidth_bytes", "Network bandwidth usage in bytes")
+
+# Application Resource Metrics
+ACTIVE_CONNECTIONS_TOTAL_GAUGE = gauge("semantrix_active_connections_total", "Total number of active connections")
+CONNECTION_POOL_UTILIZATION_GAUGE = gauge("semantrix_connection_pool_utilization", "Connection pool utilization percentage")
+THREAD_POOL_SIZE_GAUGE = gauge("semantrix_thread_pool_size", "Thread pool size")
+QUEUE_DEPTH_GAUGE = gauge("semantrix_queue_depth", "Current queue depth")
