@@ -2,13 +2,13 @@
 Two-Phase Commit (2PC) coordinator for atomic operations across multiple resources.
 """
 import asyncio
-import logging
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional, Tuple, TypeVar, Generic, Callable, Awaitable
 
 from semantrix.utils.wal import WriteAheadLog, OperationType, LogStatus as OperationStatus
+from semantrix.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 T = TypeVar('T')
 

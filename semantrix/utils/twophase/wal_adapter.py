@@ -5,13 +5,13 @@ This module provides adapters and factories for integrating different WAL
 implementations with the 2PC system.
 """
 
-import logging
 from typing import Any, Dict, List, Optional, Union
 from abc import ABC, abstractmethod
 
 from .interfaces import WALInterface, WALFactory
+from semantrix.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class WALAdapter(WALInterface):

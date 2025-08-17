@@ -10,12 +10,12 @@ from typing import (
 from uuid import UUID, uuid4
 import asyncio
 import json
-import logging
 
 import numpy as np
 import numpy.typing as npt
 
 from semantrix.utils.datetime_utils import utc_now
+from semantrix.utils.logging import get_logger
 
 # Type aliases
 Vector = Union[npt.NDArray[np.float32], List[float]]
@@ -129,7 +129,7 @@ class BaseVectorStore(ABC):
         self.metric = metric
         self.namespace = namespace
         self._executor = ThreadPoolExecutor()
-        self._logger = logging.getLogger(self.__class__.__name__)
+        self._logger = get_logger(self.__class__.__name__)
     
     # Core Operations
     

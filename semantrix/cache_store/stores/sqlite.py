@@ -6,7 +6,6 @@ Provides a persistent, file-based cache using SQLite with async support.
 
 import asyncio
 import json
-import logging
 import sqlite3
 import time
 from pathlib import Path
@@ -14,9 +13,10 @@ from typing import Any, Dict, List, Optional, Union, cast
 
 from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy, DeletionMode
 from semantrix.exceptions import CacheOperationError
+from semantrix.utils.logging import get_logger
 
 # Configure logging
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class SQLiteCacheStore(BaseCacheStore):
     """

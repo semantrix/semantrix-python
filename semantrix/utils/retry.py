@@ -6,13 +6,13 @@ to handle transient failures in distributed systems.
 """
 import asyncio
 import functools
-import logging
 import random
 import time
 from typing import Any, Awaitable, Callable, Optional, Type, TypeVar, Union, cast
 
 from semantrix.exceptions import RetryError
 from typing_extensions import ParamSpec, TypeAlias
+from semantrix.utils.logging import get_logger
 
 T = TypeVar("T")
 P = ParamSpec("P")
@@ -22,7 +22,7 @@ FuncT: TypeAlias = Union[
     Callable[P, R],  # Sync function
 ]
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def retry(

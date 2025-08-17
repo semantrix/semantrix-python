@@ -9,8 +9,10 @@ import logging
 import logging.handlers
 import os
 import sys
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
@@ -22,21 +24,25 @@ correlation_id: ContextVar[Optional[str]] = ContextVar('correlation_id', default
 
 class StructuredFormatter(logging.Formatter):
     """
-    Structured JSON formatter for logs.
+    Structured JSON formatter for logs with performance optimizations.
     
     This formatter outputs logs in JSON format with consistent structure
     including timestamp, level, correlation ID, and structured data.
     """
     
-    def __init__(self, include_correlation_id: bool = True):
+    def __init__(self, include_correlation_id: bool = True, cache_size: int = 1000):
         """
         Initialize the structured formatter.
         
         Args:
             include_correlation_id: Whether to include correlation ID in logs
+            cache_size: Size of the format cache for performance
         """
         super().__init__()
         self.include_correlation_id = include_correlation_id
+        self._cache = {}
+        self._cache_size = cache_size
+        self._cache_lock = threading.RLock()
     
     def format(self, record: logging.LogRecord) -> str:
         """
@@ -48,9 +54,45 @@ class StructuredFormatter(logging.Formatter):
         Returns:
             JSON formatted log string
         """
+        # Use cache for performance
+        cache_key = self._get_cache_key(record)
+        with self._cache_lock:
+            if cache_key in self._cache:
+                return self._cache[cache_key]
+        
+        # Format the record
+        result = self._format_record(record)
+        
+        # Cache the result
+        with self._cache_lock:
+            if len(self._cache) >= self._cache_size:
+                # Simple LRU: remove oldest entry
+                self._cache.pop(next(iter(self._cache)))
+            self._cache[cache_key] = result
+        
+        return result
+    
+    def _get_cache_key(self, record: logging.LogRecord) -> tuple:
+        """Generate cache key for the record."""
+        return (
+            record.levelname,
+            record.name,
+            record.module,
+            record.funcName,
+            record.lineno,
+            bool(record.exc_info),
+            bool(hasattr(record, 'extra_fields')),
+            bool(hasattr(record, 'correlation_id'))
+        )
+    
+    def _format_record(self, record: logging.LogRecord) -> str:
+        """Format a single log record."""
+        # Use record timestamp, not current time (FIXED)
+        timestamp = datetime.fromtimestamp(record.created).isoformat() + "Z"
+        
         # Base log structure
         log_entry = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": timestamp,
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -64,6 +106,8 @@ class StructuredFormatter(logging.Formatter):
             current_correlation_id = correlation_id.get()
             if current_correlation_id:
                 log_entry["correlation_id"] = current_correlation_id
+            elif hasattr(record, 'correlation_id') and record.correlation_id:
+                log_entry["correlation_id"] = record.correlation_id
         
         # Add exception info if present
         if record.exc_info:
@@ -73,21 +117,25 @@ class StructuredFormatter(logging.Formatter):
                 "traceback": self.formatException(record.exc_info)
             }
         
-        # Add extra fields if present
+        # Add extra fields if present (IMPROVED)
         if hasattr(record, 'extra_fields'):
             log_entry.update(record.extra_fields)
         
-        # Add any additional attributes
+        # Handle standard extra fields (IMPROVED)
         for key, value in record.__dict__.items():
-            if key not in ['name', 'msg', 'args', 'levelname', 'levelno', 'pathname', 
-                          'filename', 'module', 'lineno', 'funcName', 'created', 
-                          'msecs', 'relativeCreated', 'thread', 'threadName', 
-                          'processName', 'process', 'getMessage', 'exc_info', 
-                          'exc_text', 'stack_info', 'extra_fields']:
-                if isinstance(value, (str, int, float, bool, list, dict, type(None))):
-                    log_entry[key] = value
+            if key.startswith('_') or key in [
+                'name', 'msg', 'args', 'levelname', 'levelno', 
+                'pathname', 'filename', 'module', 'lineno', 
+                'funcName', 'created', 'msecs', 'relativeCreated', 
+                'thread', 'threadName', 'processName', 'process', 
+                'getMessage', 'exc_info', 'exc_text', 'stack_info',
+                'extra_fields', 'correlation_id'
+            ]:
+                continue
+            if isinstance(value, (str, int, float, bool, list, dict, type(None))):
+                log_entry[key] = value
         
-        return json.dumps(log_entry, ensure_ascii=False)
+        return json.dumps(log_entry, ensure_ascii=False, default=str)
 
 
 class CorrelationIdFilter(logging.Filter):
@@ -109,6 +157,66 @@ class CorrelationIdFilter(logging.Filter):
         if current_correlation_id:
             record.correlation_id = current_correlation_id
         return True
+
+
+class AsyncLogHandler(logging.Handler):
+    """
+    Async-aware log handler for better performance in async applications.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._executor = None
+        self._loop = None
+        self._lock = threading.RLock()
+    
+    def emit(self, record):
+        """Emit a record asynchronously if possible."""
+        try:
+            # Try to get the current event loop
+            with self._lock:
+                if self._loop is None:
+                    try:
+                        self._loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        # No event loop, use sync
+                        super().emit(record)
+                        return
+                
+                # Schedule in thread pool to avoid blocking
+                if self._executor is None:
+                    self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="SemantrixLogger")
+                
+                self._loop.run_in_executor(self._executor, super().emit, record)
+        except Exception:
+            # Fallback to sync if async fails
+            super().emit(record)
+
+
+class SemantrixLoggerAdapter(logging.LoggerAdapter):
+    """
+    Logger adapter that automatically adds correlation IDs and structured data.
+    """
+    
+    def __init__(self, logger, correlation_id=None, extra_fields=None):
+        super().__init__(logger, {})
+        self.correlation_id = correlation_id
+        self.extra_fields = extra_fields or {}
+    
+    def process(self, msg, kwargs):
+        """Process the log message and add correlation ID and extra fields."""
+        if self.correlation_id:
+            kwargs.setdefault('extra', {})['correlation_id'] = self.correlation_id
+        
+        if self.extra_fields:
+            kwargs.setdefault('extra', {})['extra_fields'] = self.extra_fields
+        
+        return msg, kwargs
+    
+    def bind(self, **kwargs):
+        """Create a new logger with additional context."""
+        new_extra_fields = {**self.extra_fields, **kwargs}
+        return SemantrixLoggerAdapter(self.logger, self.correlation_id, new_extra_fields)
 
 
 class MetricsLogger:
@@ -235,9 +343,9 @@ class MetricsLogger:
         )
 
 
-class LogManager:
+class ThreadSafeLogManager:
     """
-    Centralized log manager for Semantrix.
+    Thread-safe centralized log manager for Semantrix.
     
     This class manages loggers, handlers, and configuration for the entire
     application with support for structured logging and correlation IDs.
@@ -249,7 +357,8 @@ class LogManager:
                  log_file: Optional[str] = None,
                  max_bytes: int = 10 * 1024 * 1024,  # 10MB
                  backup_count: int = 5,
-                 include_correlation_id: bool = True):
+                 include_correlation_id: bool = True,
+                 enable_async_handler: bool = False):
         """
         Initialize the log manager.
         
@@ -260,6 +369,7 @@ class LogManager:
             max_bytes: Maximum size of log file before rotation
             backup_count: Number of backup files to keep
             include_correlation_id: Whether to include correlation IDs
+            enable_async_handler: Whether to use async-aware handlers
         """
         self.log_level = getattr(logging, log_level.upper())
         self.log_format = log_format
@@ -267,16 +377,32 @@ class LogManager:
         self.max_bytes = max_bytes
         self.backup_count = backup_count
         self.include_correlation_id = include_correlation_id
+        self.enable_async_handler = enable_async_handler
         
-        # Configure root logger
-        self._configure_root_logger()
+        # Thread safety
+        self._lock = threading.RLock()
+        self._initialized = False
+        self._loggers = {}
         
-        # Create main logger
-        self.logger = logging.getLogger("semantrix")
-        self.logger.setLevel(self.log_level)
+        # Initialize immediately
+        self._safe_initialize()
         
-        # Create metrics logger
+        # Create main logger and metrics logger
+        self.logger = self.get_logger("semantrix")
         self.metrics = MetricsLogger(self.logger)
+    
+    def _safe_initialize(self):
+        """Thread-safe initialization."""
+        with self._lock:
+            if not self._initialized:
+                try:
+                    self._configure_root_logger()
+                    self._initialized = True
+                except Exception as e:
+                    # Fallback to basic logging if configuration fails
+                    logging.basicConfig(level=self.log_level)
+                    logging.error(f"Failed to initialize Semantrix logging: {e}")
+                    self._initialized = True
     
     def _configure_root_logger(self):
         """Configure the root logger with handlers."""
@@ -296,7 +422,11 @@ class LogManager:
             )
         
         # Console handler
-        console_handler = logging.StreamHandler(sys.stdout)
+        if self.enable_async_handler:
+            console_handler = AsyncLogHandler(sys.stdout)
+        else:
+            console_handler = logging.StreamHandler(sys.stdout)
+        
         console_handler.setLevel(self.log_level)
         console_handler.setFormatter(formatter)
         
@@ -307,23 +437,26 @@ class LogManager:
         
         # File handler (if specified)
         if self.log_file:
-            # Ensure log directory exists
-            log_path = Path(self.log_file)
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Rotating file handler
-            file_handler = logging.handlers.RotatingFileHandler(
-                self.log_file,
-                maxBytes=self.max_bytes,
-                backupCount=self.backup_count
-            )
-            file_handler.setLevel(self.log_level)
-            file_handler.setFormatter(formatter)
-            
-            if self.include_correlation_id:
-                file_handler.addFilter(CorrelationIdFilter())
-            
-            root_logger.addHandler(file_handler)
+            try:
+                # Ensure log directory exists
+                log_path = Path(self.log_file)
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Rotating file handler
+                file_handler = logging.handlers.RotatingFileHandler(
+                    self.log_file,
+                    maxBytes=self.max_bytes,
+                    backupCount=self.backup_count
+                )
+                file_handler.setLevel(self.log_level)
+                file_handler.setFormatter(formatter)
+                
+                if self.include_correlation_id:
+                    file_handler.addFilter(CorrelationIdFilter())
+                
+                root_logger.addHandler(file_handler)
+            except Exception as e:
+                logging.error(f"Failed to configure file logging: {e}")
     
     def get_logger(self, name: str) -> logging.Logger:
         """
@@ -335,7 +468,27 @@ class LogManager:
         Returns:
             Configured logger instance
         """
-        return logging.getLogger(name)
+        with self._lock:
+            if name not in self._loggers:
+                logger = logging.getLogger(name)
+                logger.setLevel(self.log_level)
+                self._loggers[name] = logger
+            return self._loggers[name]
+    
+    def get_adapter(self, name: str, correlation_id: Optional[str] = None, **extra_fields) -> SemantrixLoggerAdapter:
+        """
+        Get a logger adapter with correlation ID and extra fields.
+        
+        Args:
+            name: Logger name
+            correlation_id: Correlation ID for this logger
+            **extra_fields: Additional fields to include in all log messages
+            
+        Returns:
+            Logger adapter instance
+        """
+        logger = self.get_logger(name)
+        return SemantrixLoggerAdapter(logger, correlation_id, extra_fields)
     
     def set_correlation_id(self, correlation_id_value: str):
         """
@@ -360,8 +513,9 @@ class LogManager:
         correlation_id.set(None)
 
 
-# Global log manager instance
-_log_manager: Optional[LogManager] = None
+# Global log manager instance with thread safety
+_log_manager: Optional[ThreadSafeLogManager] = None
+_log_manager_lock = threading.RLock()
 
 
 def initialize_logging(
@@ -370,8 +524,9 @@ def initialize_logging(
     log_file: Optional[str] = None,
     max_bytes: int = 10 * 1024 * 1024,
     backup_count: int = 5,
-    include_correlation_id: bool = True
-) -> LogManager:
+    include_correlation_id: bool = True,
+    enable_async_handler: bool = False
+) -> ThreadSafeLogManager:
     """
     Initialize the global logging system.
     
@@ -382,21 +537,24 @@ def initialize_logging(
         max_bytes: Maximum size of log file before rotation
         backup_count: Number of backup files to keep
         include_correlation_id: Whether to include correlation IDs
+        enable_async_handler: Whether to use async-aware handlers
         
     Returns:
         Configured log manager instance
     """
     global _log_manager
     
-    if _log_manager is None:
-        _log_manager = LogManager(
-            log_level=log_level,
-            log_format=log_format,
-            log_file=log_file,
-            max_bytes=max_bytes,
-            backup_count=backup_count,
-            include_correlation_id=include_correlation_id
-        )
+    with _log_manager_lock:
+        if _log_manager is None:
+            _log_manager = ThreadSafeLogManager(
+                log_level=log_level,
+                log_format=log_format,
+                log_file=log_file,
+                max_bytes=max_bytes,
+                backup_count=backup_count,
+                include_correlation_id=include_correlation_id,
+                enable_async_handler=enable_async_handler
+            )
     
     return _log_manager
 
@@ -411,11 +569,28 @@ def get_logger(name: str) -> logging.Logger:
     Returns:
         Logger instance
     """
-    if _log_manager is None:
-        # Initialize with defaults if not already initialized
-        initialize_logging()
+    with _log_manager_lock:
+        if _log_manager is None:
+            initialize_logging()
+        return _log_manager.get_logger(name)
+
+
+def get_adapter(name: str, correlation_id: Optional[str] = None, **extra_fields) -> SemantrixLoggerAdapter:
+    """
+    Get a logger adapter with correlation ID and extra fields.
     
-    return _log_manager.get_logger(name)
+    Args:
+        name: Logger name
+        correlation_id: Correlation ID for this logger
+        **extra_fields: Additional fields to include in all log messages
+        
+    Returns:
+        Logger adapter instance
+    """
+    with _log_manager_lock:
+        if _log_manager is None:
+            initialize_logging()
+        return _log_manager.get_adapter(name, correlation_id, **extra_fields)
 
 
 def get_metrics_logger() -> MetricsLogger:
@@ -425,10 +600,10 @@ def get_metrics_logger() -> MetricsLogger:
     Returns:
         Metrics logger instance
     """
-    if _log_manager is None:
-        initialize_logging()
-    
-    return _log_manager.metrics
+    with _log_manager_lock:
+        if _log_manager is None:
+            initialize_logging()
+        return _log_manager.metrics
 
 
 def set_correlation_id(correlation_id_value: str):
@@ -438,10 +613,10 @@ def set_correlation_id(correlation_id_value: str):
     Args:
         correlation_id_value: Correlation ID value
     """
-    if _log_manager is None:
-        initialize_logging()
-    
-    _log_manager.set_correlation_id(correlation_id_value)
+    with _log_manager_lock:
+        if _log_manager is None:
+            initialize_logging()
+        _log_manager.set_correlation_id(correlation_id_value)
 
 
 def get_correlation_id() -> Optional[str]:
@@ -451,16 +626,17 @@ def get_correlation_id() -> Optional[str]:
     Returns:
         Current correlation ID or None
     """
-    if _log_manager is None:
-        return None
-    
-    return _log_manager.get_correlation_id()
+    with _log_manager_lock:
+        if _log_manager is None:
+            return None
+        return _log_manager.get_correlation_id()
 
 
 def clear_correlation_id():
     """Clear the current correlation ID."""
-    if _log_manager is not None:
-        _log_manager.clear_correlation_id()
+    with _log_manager_lock:
+        if _log_manager is not None:
+            _log_manager.clear_correlation_id()
 
 
 class CorrelationIdContext:
@@ -503,3 +679,13 @@ def with_correlation_id(correlation_id_value: Optional[str] = None):
         CorrelationIdContext instance
     """
     return CorrelationIdContext(correlation_id_value)
+
+
+# Import asyncio and ThreadPoolExecutor for async support
+try:
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+except ImportError:
+    # Fallback for environments without asyncio
+    asyncio = None
+    ThreadPoolExecutor = None

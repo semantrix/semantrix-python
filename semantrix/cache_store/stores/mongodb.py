@@ -6,7 +6,6 @@ Provides a persistent, document-based cache using MongoDB with async support.
 
 import asyncio
 import json
-import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Union
 
@@ -18,9 +17,10 @@ from pymongo.errors import PyMongoError
 from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy, DeletionMode
 from semantrix.exceptions import CacheOperationError
 from semantrix.utils.datetime_utils import utc_now
+from semantrix.utils.logging import get_logger
 
 # Configure logging
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class MongoDBCacheStore(BaseCacheStore):
     """

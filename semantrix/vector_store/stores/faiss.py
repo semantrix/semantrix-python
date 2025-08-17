@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import os
 import pickle
 from concurrent.futures import ThreadPoolExecutor
@@ -25,6 +24,7 @@ except ImportError:
     IndexIDMap = object
 
 from semantrix.exceptions import VectorOperationError
+from semantrix.utils.logging import get_logger
 
 from ..base import (
     BaseVectorStore, DistanceMetric, IndexType, Metadata, MetadataFilter, 

@@ -3,7 +3,6 @@ Two-Phase Commit coordinator for atomic operations across multiple resources.
 """
 
 import asyncio
-import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -11,8 +10,9 @@ from semantrix.utils.wal import OperationType
 from .operation import TwoPhaseOperation, TwoPhaseState
 from .participant import Participant
 from .interfaces import WALInterface
+from semantrix.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class TwoPhaseCoordinator:

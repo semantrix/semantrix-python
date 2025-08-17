@@ -6,16 +6,16 @@ Provides a distributed, persistent cache using Redis with async support.
 
 import json
 import time
-import logging
 from typing import Optional, Any, Dict, Union
 
 from redis.exceptions import RedisError
 
 from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy, DeletionMode
 from semantrix.exceptions import CacheOperationError, ValidationError
+from semantrix.utils.logging import get_logger
 
 # Configure logging
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class RedisCacheStore(BaseCacheStore):
     """
@@ -63,13 +63,32 @@ class RedisCacheStore(BaseCacheStore):
                         data = json.loads(value)
                         # Check if item is tombstoned
                         if data.get('tombstoned', False):
+                            logger.debug("Cache hit (tombstoned)", extra={
+                                "cache_key": key,
+                                "cache_type": "redis"
+                            })
                             return None
+                        logger.debug("Cache hit", extra={
+                            "cache_key": key,
+                            "cache_type": "redis",
+                            "response_length": len(data.get('response', ''))
+                        })
                         return data.get('response')
                     except json.JSONDecodeError as e:
-                        logger.error(f"Failed to decode JSON from cache key {key}: {e}")
+                        logger.error("Failed to decode JSON from cache", extra={
+                            "cache_key": key,
+                            "cache_type": "redis",
+                            "error_type": "JSONDecodeError",
+                            "error_message": str(e)
+                        })
                         raise ValidationError(f"Corrupt data in cache for key {key}.", original_exception=e) from e
         except RedisError as e:
-            logger.error(f"Redis error getting value for key {key}: {e}")
+            logger.error("Redis error getting value", extra={
+                "cache_key": key,
+                "cache_type": "redis",
+                "error_type": "RedisError",
+                "error_message": str(e)
+            })
             raise CacheOperationError(f"Failed to get value from Redis for key {key}", original_exception=e) from e
         return None
 

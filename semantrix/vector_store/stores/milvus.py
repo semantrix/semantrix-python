@@ -5,7 +5,6 @@ Install it with: pip install pymilvus
 """
 
 import json
-import logging
 import uuid
 from typing import Any, Dict, List, Optional, Sequence, Union, cast
 
@@ -28,6 +27,7 @@ except ImportError:
 import numpy as np
 
 from semantrix.exceptions import VectorOperationError
+from semantrix.utils.logging import get_logger
 
 from ..base import (
     BaseVectorStore,
@@ -77,7 +77,7 @@ class MilvusVectorStore(BaseVectorStore):
             **kwargs: Additional arguments for pymilvus.connections.connect()
         """
         super().__init__(dimension=dimension, metric=metric, namespace=namespace)
-        self._logger = logging.getLogger(__name__)
+        self._logger = get_logger(__name__)
         
         if not MILVUS_AVAILABLE:
             raise ImportError(

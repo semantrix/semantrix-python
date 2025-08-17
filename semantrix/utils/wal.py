@@ -1,6 +1,5 @@
 import asyncio
 import json
-import logging
 import os
 import time
 import uuid
@@ -11,8 +10,9 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 from semantrix.utils.datetime_utils import utc_now
+from semantrix.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class OperationType(str, Enum):
     SET = "SET"

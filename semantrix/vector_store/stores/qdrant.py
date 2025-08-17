@@ -4,7 +4,6 @@ Note: This module requires the 'qdrant-client' package to be installed.
 Install it with: pip install qdrant-client
 """
 
-import logging
 import uuid
 from typing import Any, Dict, List, Optional, Sequence, Union, cast
 
@@ -26,6 +25,7 @@ except ImportError:
     QDRANT_AVAILABLE = False
 
 from semantrix.exceptions import VectorOperationError
+from semantrix.utils.logging import get_logger
 
 from ..base import (
     BaseVectorStore,
@@ -84,7 +84,7 @@ class QdrantVectorStore(BaseVectorStore):
             **kwargs: Additional arguments for QdrantClient
         """
         super().__init__(dimension=dimension, metric=metric, namespace=namespace)
-        self._logger = logging.getLogger(__name__)
+        self._logger = get_logger(__name__)
         
         if not QDRANT_AVAILABLE:
             raise VectorOperationError(

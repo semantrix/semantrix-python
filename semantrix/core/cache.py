@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -29,9 +28,11 @@ from semantrix.exceptions import (
     VectorOperationError,
     ConfigurationError
 )
+from semantrix.utils.logging import get_logger, get_adapter, with_correlation_id, get_metrics_logger
+from semantrix.utils.logging_config import configure_from_environment
 
 # Set up logging
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 
@@ -46,7 +47,9 @@ class Semantrix:
         enable_2pc: bool = True,
         embedder: Optional[BaseEmbedder] = None,
         vector_store: Optional[BaseVectorStore] = None,
-        cache_store: Optional[BaseCacheStore] = None
+        cache_store: Optional[BaseCacheStore] = None,
+        enable_logging: bool = True,
+        logging_config: Optional[Dict[str, Any]] = None
     ):
         """
         Initialize Semantrix semantic cache.
@@ -61,7 +64,19 @@ class Semantrix:
             embedder: Custom embedder implementation (defaults to sentence-transformers)
             vector_store: Custom vector store implementation (defaults to FAISS)
             cache_store: Custom cache store implementation (defaults to InMemoryStore)
+            enable_logging: Enable structured logging
+            logging_config: Custom logging configuration
         """
+        # Initialize logging if enabled
+        if enable_logging:
+            if logging_config:
+                # Use custom logging configuration
+                from semantrix.utils.logging import initialize_logging
+                initialize_logging(**logging_config)
+            else:
+                # Use environment-based configuration
+                configure_from_environment()
+        
         # Initialize components with defaults if not provided
         self.embedder = embedder or get_embedder("sentence-transformers")
         self.vector_store = vector_store or FAISSVectorStore(dimension=self.embedder.get_dimension())
@@ -80,6 +95,9 @@ class Semantrix:
         self.profiler = Profiler(enabled=enable_profiling)
         self.similarity_threshold = similarity_threshold
         
+        # Initialize logging components
+        self.metrics_logger = get_metrics_logger()
+        
         # Track in-progress operations for idempotency
         self._pending_operations: Dict[str, asyncio.Task] = {}
         self._operation_lock = asyncio.Lock()
@@ -88,6 +106,13 @@ class Semantrix:
         # Background tombstone cleanup
         self._tombstone_cleanup_task: Optional[asyncio.Task] = None
         self._tombstone_cleanup_interval = 3600  # 1 hour default
+        
+        logger.info("Semantrix initialized", extra={
+            "similarity_threshold": similarity_threshold,
+            "enable_wal": enable_wal,
+            "enable_2pc": enable_2pc,
+            "enable_profiling": enable_profiling
+        })
 
     async def initialize(self):
         """Initialize the cache and its components."""
@@ -202,69 +227,116 @@ class Semantrix:
         **kwargs
     ) -> str:
         """Execute an operation with WAL and 2PC support."""
-        logger.debug(f"_execute_with_wal called with operation_type={operation_type}, data={data}")
+        op_id = operation_id or str(uuid.uuid4())
         
-        if not self.wal or not self.coordinator:
-            # Fall back to non-atomic execution if WAL or 2PC is disabled
-            result = await self._execute_operation(operation_type, data, operation_id or str(uuid.uuid4()))
-            logger.debug(f"Fallback _execute_operation result: {result}")
-            return result
-        
-        async with self._operation_ctx(operation_id) as op_id:
-            logger.debug(f"Operation context created with op_id={op_id}")
+        # Use correlation ID context for tracing
+        with with_correlation_id(op_id):
+            logger.debug("Executing operation with WAL", extra={
+                "operation_type": operation_type.value,
+                "operation_id": op_id,
+                "data_keys": list(data.keys())
+            })
             
-            # Create participants
-            participants = [
-                CacheStoreParticipant(self.cache_store),
-                VectorStoreParticipant(self.vector_store)
-            ]
+            if not self.wal or not self.coordinator:
+                # Fall back to non-atomic execution if WAL or 2PC is disabled
+                result = await self._execute_operation(operation_type, data, op_id)
+                logger.debug("Fallback operation completed", extra={
+                    "operation_id": op_id,
+                    "result_type": type(result).__name__
+                })
+                return result
             
-            # Create and execute 2PC operation
-            operation = await self.coordinator.create_operation(
-                operation_type=operation_type,
-                data=data,
-                participants=participants,
-                operation_id=op_id
-            )
-            logger.debug(f"Created 2PC operation: {operation}")
-            
-            try:
-                success = await self.coordinator.execute_operation(operation)
-                logger.debug(f"Operation execution completed with success={success}")
+            async with self._operation_ctx(op_id) as ctx_op_id:
+                logger.debug("Operation context created", extra={"operation_id": ctx_op_id})
                 
-                if not success:
-                    # If any participant failed, get the first error message
-                    error_msgs = [
-                        msg for success, msg in (operation.prepare_results + operation.commit_results)
-                        if not success and msg
-                    ]
-                    error_msg = "Failed to execute operation atomically: " + "; ".join(error_msgs)
-                    logger.error(error_msg)
-                    raise OperationError(error_msg)
+                # Create participants
+                participants = [
+                    CacheStoreParticipant(self.cache_store),
+                    VectorStoreParticipant(self.vector_store)
+                ]
+                
+                # Create and execute 2PC operation
+                operation = await self.coordinator.create_operation(
+                    operation_type=operation_type,
+                    data=data,
+                    participants=participants,
+                    operation_id=ctx_op_id
+                )
+                logger.debug("2PC operation created", extra={"operation_id": ctx_op_id})
+                
+                try:
+                    # Log operation start
+                    self.metrics_logger.log_operation_start(
+                        "2pc_execution",
+                        operation_type=operation_type.value,
+                        operation_id=ctx_op_id
+                    )
                     
-                # Check if any participant raised an exception during commit
-                for i, (success, msg) in enumerate(operation.commit_results):
-                    if not success and msg and "Simulated failure" in msg:
-                        raise OperationError(msg)
-                
-                # For SET operations, fetch the response from the cache store to ensure consistency
-                if operation_type == OperationType.SET:
-                    prompt = data['prompt']
-                    logger.debug(f"Fetching response for prompt: {prompt}")
-                    response = await self.cache_store.get(prompt)
-                    logger.debug(f"Retrieved response from cache: {response}")
-                    return response
+                    start_time = time.time()
+                    success = await self.coordinator.execute_operation(operation)
+                    duration = time.time() - start_time
                     
-                logger.debug(f"Returning operation_id: {op_id}")
-                return op_id
-                
-            except Exception as e:
-                logger.error(f"Error during 2PC operation: {e}", exc_info=True)
-                # Ensure operation is aborted on failure
-                if operation.state not in (TwoPhaseState.ABORTED, TwoPhaseState.FAILED):
-                    await self.coordinator._abort(operation)
-                # Re-raise the original exception to maintain the test's expected behavior
-                raise
+                    # Log operation end
+                    self.metrics_logger.log_operation_end(
+                        "2pc_execution",
+                        duration,
+                        success,
+                        operation_type=operation_type.value,
+                        operation_id=ctx_op_id
+                    )
+                    
+                    logger.debug("Operation execution completed", extra={
+                        "operation_id": ctx_op_id,
+                        "success": success,
+                        "duration_seconds": duration
+                    })
+                    
+                    if not success:
+                        # If any participant failed, get the first error message
+                        error_msgs = [
+                            msg for success, msg in (operation.prepare_results + operation.commit_results)
+                            if not success and msg
+                        ]
+                        error_msg = "Failed to execute operation atomically: " + "; ".join(error_msgs)
+                        logger.error("2PC operation failed", extra={
+                            "operation_id": ctx_op_id,
+                            "error_messages": error_msgs
+                        })
+                        raise OperationError(error_msg)
+                        
+                    # Check if any participant raised an exception during commit
+                    for i, (success, msg) in enumerate(operation.commit_results):
+                        if not success and msg and "Simulated failure" in msg:
+                            raise OperationError(msg)
+                    
+                    # For SET operations, fetch the response from the cache store to ensure consistency
+                    if operation_type == OperationType.SET:
+                        prompt = data['prompt']
+                        logger.debug("Fetching response for SET operation", extra={
+                            "operation_id": ctx_op_id,
+                            "prompt_length": len(prompt)
+                        })
+                        response = await self.cache_store.get(prompt)
+                        logger.debug("Response retrieved from cache", extra={
+                            "operation_id": ctx_op_id,
+                            "response_length": len(response) if response else 0
+                        })
+                        return response
+                        
+                    logger.debug("Returning operation ID", extra={"operation_id": ctx_op_id})
+                    return ctx_op_id
+                    
+                except Exception as e:
+                    logger.error("Error during 2PC operation", extra={
+                        "operation_id": ctx_op_id,
+                        "error_type": type(e).__name__,
+                        "error_message": str(e)
+                    }, exc_info=True)
+                    # Ensure operation is aborted on failure
+                    if operation.state not in (TwoPhaseState.ABORTED, TwoPhaseState.FAILED):
+                        await self.coordinator._abort(operation)
+                    # Re-raise the original exception to maintain the test's expected behavior
+                    raise
     
     def _start_tombstone_cleanup_task(self):
         """Start the background tombstone cleanup task."""
@@ -386,43 +458,111 @@ class Semantrix:
         validate_prompt(prompt)
         validate_operation_id(operation_id)
         
-        # Check if the item is tombstoned first
-        if await self.cache_store.is_tombstoned(prompt):
-            return None
+        # Use correlation ID for tracing
+        op_id = operation_id or str(uuid.uuid4())
+        with with_correlation_id(op_id):
+            logger.debug("Processing get request", extra={
+                "operation_id": op_id,
+                "prompt_length": len(prompt)
+            })
             
-        # Check if we have an exact match first (fast path)
-        if exact_match := await self.cache_store.get(prompt):
-            return exact_match
-            
-        # If no exact match, try semantic search
-        return await self._get_semantic(prompt)
+            # Check if the item is tombstoned first
+            if await self.cache_store.is_tombstoned(prompt):
+                logger.debug("Item is tombstoned", extra={
+                    "operation_id": op_id,
+                    "prompt_length": len(prompt)
+                })
+                return None
+                
+            # Check if we have an exact match first (fast path)
+            if exact_match := await self.cache_store.get(prompt):
+                logger.debug("Exact match found", extra={
+                    "operation_id": op_id,
+                    "response_length": len(exact_match)
+                })
+                self.metrics_logger.log_cache_hit("exact", prompt, operation_id=op_id)
+                return exact_match
+                
+            # If no exact match, try semantic search
+            logger.debug("No exact match, attempting semantic search", extra={
+                "operation_id": op_id
+            })
+            return await self._get_semantic(prompt, op_id)
 
     @retry(max_retries=3, initial_delay=0.5, backoff_factor=2)
-    async def _get_semantic(self, prompt: str) -> Optional[str]:
+    async def _get_semantic(self, prompt: str, operation_id: str) -> Optional[str]:
         with self.profiler.record("get"):
             # 1. Check resource constraints
             if not self.resource_limits.allow_operation():
+                logger.debug("Resource constraints not met", extra={"operation_id": operation_id})
                 return None
                 
             # 2. Semantic search (if vector store is available)
             if hasattr(self.embedder, 'encode') and hasattr(self.vector_store, 'search'):
                 try:
+                    # Log semantic search start
+                    self.metrics_logger.log_operation_start(
+                        "semantic_search",
+                        operation_id=operation_id,
+                        prompt_length=len(prompt)
+                    )
+                    
+                    start_time = time.time()
+                    
                     # Use async embedding
                     embedding = await self.embedder.encode(prompt)
                     
                     # Search in vector store
                     results = await self.vector_store.search(embedding, k=3)
                     
+                    duration = time.time() - start_time
+                    
+                    # Log semantic search end
+                    self.metrics_logger.log_operation_end(
+                        "semantic_search",
+                        duration,
+                        True,
+                        operation_id=operation_id,
+                        results_count=len(results)
+                    )
+                    
+                    logger.debug("Semantic search completed", extra={
+                        "operation_id": operation_id,
+                        "duration_seconds": duration,
+                        "results_count": len(results)
+                    })
+                    
                     # Check each result to see if it's not tombstoned
-                    for result in results:
+                    for i, result in enumerate(results):
                         if result.document and result.score >= self.similarity_threshold:
                             # Check if the matched document is not tombstoned
                             if not await self.cache_store.is_tombstoned(result.document):
+                                logger.debug("Semantic match found", extra={
+                                    "operation_id": operation_id,
+                                    "result_index": i,
+                                    "score": result.score,
+                                    "similarity_threshold": self.similarity_threshold
+                                })
+                                self.metrics_logger.log_cache_hit("semantic", result.document, 
+                                                                 operation_id=operation_id, score=result.score)
                                 return await self.cache_store.get(result.document)
+                    
+                    logger.debug("No semantic match found", extra={
+                        "operation_id": operation_id,
+                        "results_count": len(results)
+                    })
+                    self.metrics_logger.log_cache_miss("semantic", prompt, operation_id=operation_id)
+                    
                 except Exception as e:
-                    logger.error(f"Error during semantic search: {e}")
+                    logger.error("Error during semantic search", extra={
+                        "operation_id": operation_id,
+                        "error_type": type(e).__name__,
+                        "error_message": str(e)
+                    }, exc_info=True)
                     # Wrap in VectorOperationError and re-raise
                     raise VectorOperationError("Semantic search failed", original_exception=e)
+            else:
+                logger.debug("Semantic search not available", extra={"operation_id": operation_id})
                     
             return None
 

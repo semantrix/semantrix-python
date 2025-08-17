@@ -5,7 +5,6 @@ This module contains participant implementations for different Semantrix compone
 that need to participate in atomic operations.
 """
 
-import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from semantrix.utils.twophase import Participant, TwoPhaseOperation
@@ -17,8 +16,9 @@ from semantrix.exceptions import (
     VectorOperationError,
     ValidationError
 )
+from semantrix.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class CacheStoreParticipant(Participant):

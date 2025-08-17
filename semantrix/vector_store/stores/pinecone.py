@@ -4,7 +4,6 @@ Note: This module requires the 'pinecone-client' package to be installed.
 Install it with: pip install pinecone-client
 """
 
-import logging
 from typing import Any, Dict, List, Optional, Union, cast
 
 # Optional import - will raise ImportError if not available
@@ -16,6 +15,7 @@ except ImportError:
     PINE_AVAILABLE = False
 
 from semantrix.exceptions import VectorOperationError
+from semantrix.utils.logging import get_logger
 
 from ..base import (
     BaseVectorStore,
@@ -45,7 +45,7 @@ class PineconeVectorStore(BaseVectorStore):
     ) -> None:
         """Initialize the Pinecone vector store."""
         super().__init__(dimension=dimension, metric=metric, namespace=namespace)
-        self._logger = logging.getLogger(__name__)
+        self._logger = get_logger(__name__)
         
         if not PINE_AVAILABLE:
             raise VectorOperationError(

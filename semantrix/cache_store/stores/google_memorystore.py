@@ -7,7 +7,6 @@ It's optimized for Google Cloud Platform (GCP) environments.
 
 import asyncio
 import json
-import logging
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Union, cast
@@ -20,9 +19,10 @@ from redis.exceptions import RedisError
 
 from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy, DeletionMode
 from semantrix.exceptions import CacheOperationError
+from semantrix.utils.logging import get_logger
 
 # Configure logging
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class GoogleMemorystoreCacheStore(BaseCacheStore):
     """

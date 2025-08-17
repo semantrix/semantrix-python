@@ -6,14 +6,14 @@ Provides a fast, distributed, ephemeral cache using Memcached with async support
 
 import json
 import time
-import logging
 from typing import Optional, Any, Dict, Union
 
 from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy, DeletionMode
 from semantrix.exceptions import CacheOperationError
+from semantrix.utils.logging import get_logger
 
 # Configure logging
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class MemcachedCacheStore(BaseCacheStore):
     """

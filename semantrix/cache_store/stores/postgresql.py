@@ -6,7 +6,6 @@ Provides a persistent, SQL-based cache using asyncpg with PostgreSQL.
 
 import asyncio
 import json
-import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Union
 
@@ -16,9 +15,10 @@ from asyncpg.pool import PoolAcquireContext
 
 from semantrix.cache_store.base import BaseCacheStore, EvictionPolicy, NoOpEvictionPolicy, DeletionMode
 from semantrix.exceptions import CacheOperationError
+from semantrix.utils.logging import get_logger
 
 # Configure logging
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class PostgreSQLCacheStore(BaseCacheStore):
     """

@@ -5,7 +5,6 @@ local in-memory/persistent storage and remote server connections.
 """
 
 import os
-import logging
 import uuid
 from typing import Any, ClassVar, Dict, List, Optional, Union, cast, overload
 import asyncio
@@ -15,6 +14,7 @@ from chromadb import Client, Collection
 from chromadb.config import Settings as ChromaSettings
 
 from semantrix.exceptions import VectorOperationError
+from semantrix.utils.logging import get_logger
 
 from ..base import (
     BaseVectorStore,
@@ -44,7 +44,7 @@ class ChromaVectorStore(BaseVectorStore):
         **kwargs: Any
     ) -> None:
         super().__init__(dimension=dimension, metric=metric, namespace=namespace)
-        self._logger = logging.getLogger(__name__)
+        self._logger = get_logger(__name__)
         self.in_memory = in_memory
         self.persist_directory = persist_directory
         self._chroma_metric = self._get_chroma_metric(metric)

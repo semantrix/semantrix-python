@@ -6,7 +6,6 @@ It extends the MongoDBCacheStore with AWS-specific optimizations and configurati
 """
 
 import asyncio
-import logging
 import ssl
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Union
@@ -18,11 +17,12 @@ from pymongo.database import Database
 from pymongo.collection import Collection
 
 from semantrix.exceptions import CacheOperationError
+from semantrix.utils.logging import get_logger
 
 from .mongodb import MongoDBCacheStore
 
 # Configure logging
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class DocumentDBCacheStore(MongoDBCacheStore):
     """
