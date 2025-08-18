@@ -144,6 +144,52 @@ class Gauge:
             return self._value
 
 
+class Timer:
+    """
+    A timer for measuring operation durations.
+    
+    Timers automatically record measurements in an associated histogram.
+    """
+    
+    def __init__(self, histogram: 'Histogram'):
+        """
+        Initialize a timer.
+        
+        Args:
+            histogram: Histogram to record measurements in
+        """
+        self.histogram = histogram
+        self._start_time: Optional[float] = None
+    
+    def start(self):
+        """Start the timer."""
+        self._start_time = time.time()
+    
+    def stop(self) -> float:
+        """
+        Stop the timer and record the duration.
+        
+        Returns:
+            Duration in seconds
+        """
+        if self._start_time is None:
+            raise RuntimeError("Timer was not started")
+        
+        duration = time.time() - self._start_time
+        self.histogram.observe(duration)
+        self._start_time = None
+        return duration
+    
+    def __enter__(self):
+        """Context manager entry."""
+        self.start()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
+        self.stop()
+
+
 class Histogram:
     """
     A histogram metric for tracking value distributions.
@@ -230,52 +276,15 @@ class Histogram:
         """Reset the histogram."""
         with self._lock:
             self._reset()
-
-
-class Timer:
-    """
-    A timer for measuring operation durations.
     
-    Timers automatically record measurements in an associated histogram.
-    """
-    
-    def __init__(self, histogram: Histogram):
+    def time(self) -> Timer:
         """
-        Initialize a timer.
-        
-        Args:
-            histogram: Histogram to record measurements in
-        """
-        self.histogram = histogram
-        self._start_time: Optional[float] = None
-    
-    def start(self):
-        """Start the timer."""
-        self._start_time = time.time()
-    
-    def stop(self) -> float:
-        """
-        Stop the timer and record the duration.
+        Create a timer for this histogram.
         
         Returns:
-            Duration in seconds
+            Timer instance that records measurements in this histogram
         """
-        if self._start_time is None:
-            raise RuntimeError("Timer was not started")
-        
-        duration = time.time() - self._start_time
-        self.histogram.observe(duration)
-        self._start_time = None
-        return duration
-    
-    def __enter__(self):
-        """Context manager entry."""
-        self.start()
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
-        self.stop()
+        return Timer(self)
 
 
 class MetricsRegistry:

@@ -58,18 +58,64 @@ class SemantrixClient:
             vector_store=vector_store,
             cache_store=cache_store
         )
+        # Initialize the cache
+        import asyncio
+        try:
+            asyncio.run(self.cache.initialize())
+        except RuntimeError:
+            # If there's already an event loop running, use it
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(self.cache.initialize())
 
     def get(self, prompt: str) -> str | None:
         """Retrieve a cached response for the given prompt, if available."""
-        return self.cache.get(prompt)
+        import asyncio
+        try:
+            return asyncio.run(self.cache.get(prompt))
+        except RuntimeError:
+            # If there's already an event loop running, use it
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(self.cache.get(prompt))
 
     def set(self, prompt: str, response: str):
         """Store a prompt-response pair in the cache."""
-        self.cache.set(prompt, response)
+        import asyncio
+        try:
+            asyncio.run(self.cache.set(prompt, response))
+        except RuntimeError:
+            # If there's already an event loop running, use it
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(self.cache.set(prompt, response))
 
     def explain(self, prompt: str) -> ExplainResult:
         """Debug why a prompt missed the cache (returns detailed explanation)."""
-        return self.cache.explain(prompt)
+        import asyncio
+        try:
+            return asyncio.run(self.cache.explain(prompt))
+        except RuntimeError:
+            # If there's already an event loop running, use it
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(self.cache.explain(prompt))
+
+    def delete(self, prompt: str, mode=None) -> bool:
+        """Delete a prompt from the cache."""
+        import asyncio
+        try:
+            return asyncio.run(self.cache.delete(prompt, mode=mode))
+        except RuntimeError:
+            # If there's already an event loop running, use it
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(self.cache.delete(prompt, mode=mode))
+
+    def tombstone(self, prompt: str) -> bool:
+        """Mark a prompt as deleted (tombstoning)."""
+        import asyncio
+        try:
+            return asyncio.run(self.cache.tombstone(prompt))
+        except RuntimeError:
+            # If there's already an event loop running, use it
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(self.cache.tombstone(prompt))
 
     @property
     def profiler_stats(self) -> dict:
@@ -79,4 +125,20 @@ class SemantrixClient:
     @property
     def resource_limits(self) -> ResourceLimits:
         """Return the resource limits object."""
-        return self.cache.resource_limits 
+        return self.cache.resource_limits
+    
+    def close(self):
+        """Close the cache and cleanup resources."""
+        import asyncio
+        try:
+            asyncio.run(self.cache.shutdown())
+        except RuntimeError:
+            # If there's already an event loop running, use it
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(self.cache.shutdown())
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close() 
